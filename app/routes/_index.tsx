@@ -432,28 +432,38 @@ function ClockInSection({ today, usersWithoutPassword }: { today: string; usersW
         </div>
 
         {/* Location status */}
-        <div className="flex items-center gap-2 text-sm" style={{ color: "#9ca3af" }}>
-          <div className="relative w-2 h-2">
-            <div
-              className="w-2 h-2 rounded-full"
-              style={{
-                background: locationStatus === "granted" ? "#34d399" : locationStatus === "denied" ? "#ef4444" : "#fbbf24",
-              }}
-            />
-            {locationStatus === "requesting" && (
-              <div className="absolute inset-0 w-2 h-2 rounded-full animate-ping" style={{ background: "#fbbf24" }} />
-            )}
-          </div>
-          {locationStatus === "granted" && (() => {
-            const atLecture = location ? distanceKm(location.lat, location.lng, UCLA_LAT, UCLA_LNG) <= AT_LECTURE_RADIUS_KM : false;
-            return atLecture
-              ? <span style={{ color: "#34d399" }}>at lecture</span>
-              : <span style={{ color: "#f97316" }}>not at lecture</span>;
-          })()}
-          {locationStatus === "denied" && <span style={{ color: "#6b7280" }}>location not shared</span>}
-          {locationStatus === "requesting" && <span>Requesting location...</span>}
-          {locationStatus === "idle" && <span>Location pending</span>}
-        </div>
+        {(() => {
+          const atLecture = locationStatus === "granted" && location
+            ? distanceKm(location.lat, location.lng, UCLA_LAT, UCLA_LNG) <= AT_LECTURE_RADIUS_KM
+            : false;
+          const dotColor = locationStatus === "requesting"
+            ? "#fbbf24"
+            : locationStatus === "denied"
+            ? "#6b7280"
+            : atLecture
+            ? "#34d399"
+            : "#fbbf24";
+
+          return (
+            <div className="flex items-center gap-2 text-sm" style={{ color: "#6b7280" }}>
+              <div className="relative w-2 h-2 flex-shrink-0">
+                <div className="w-2 h-2 rounded-full" style={{ background: dotColor }} />
+                {locationStatus === "requesting" && (
+                  <div className="absolute inset-0 w-2 h-2 rounded-full animate-ping" style={{ background: dotColor }} />
+                )}
+              </div>
+              {locationStatus === "granted" && atLecture && (
+                <span className="px-2 py-0.5 rounded-full text-xs font-medium" style={{ background: "rgba(52,211,153,0.1)", color: "#34d399", border: "1px solid rgba(52,211,153,0.2)" }}>
+                  at lecture
+                </span>
+              )}
+              {locationStatus === "granted" && !atLecture && <span>not at lecture</span>}
+              {locationStatus === "denied" && <span>location not shared</span>}
+              {locationStatus === "requesting" && <span>Requesting location...</span>}
+              {locationStatus === "idle" && <span>Location pending</span>}
+            </div>
+          );
+        })()}
 
         <button
           type="submit"
