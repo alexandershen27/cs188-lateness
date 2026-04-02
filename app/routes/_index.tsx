@@ -55,7 +55,11 @@ interface SerialCorrection {
 // ── Loader ───────────────────────────────────────────────────────────────────
 
 export async function loader() {
-  await connectDB();
+  try {
+    await connectDB();
+  } catch (error) {
+    throw new Response(error instanceof Error ? error.message : String(error), { status: 500 });
+  }
 
   const today = new Date().toISOString().slice(0, 10);
 

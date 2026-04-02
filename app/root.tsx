@@ -45,7 +45,7 @@ export default function App() {
 export function ErrorBoundary() {
   const error = useRouteError();
   const message = isRouteErrorResponse(error)
-    ? `${error.status} ${error.statusText}: ${JSON.stringify(error.data)}`
+    ? `${error.status}: ${error.data}`
     : error instanceof Error
     ? error.message
     : String(error);
