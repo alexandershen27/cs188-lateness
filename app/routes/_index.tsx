@@ -64,7 +64,7 @@ export async function loader() {
     throw new Response(error instanceof Error ? error.message : String(error), { status: 500 });
   }
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
 
   const allClockIns = await ClockIn.find().sort({ timestamp: 1 }).lean();
   const pendingCorrections = await CorrectionRequest.find({ status: "pending" })
@@ -304,7 +304,12 @@ function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number): num
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function ClockInSection({ today, usersWithoutPassword }: { today: string; usersWithoutPassword: string[] }) {
+function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture }: {
+  today: string;
+  usersWithoutPassword: string[];
+  isLectureDay: boolean;
+  nextLecture: { week: number; date: string } | null;
+}) {
   const fetcher = useFetcher<typeof action>();
   const { revalidate } = useRevalidator();
   const [selectedUser, setSelectedUser] = useState<string>("");
@@ -346,14 +351,18 @@ function ClockInSection({ today, usersWithoutPassword }: { today: string; usersW
   const latenessStr = responseData?.latenessStr as string | undefined;
   const alreadyClockedIn = responseData?.alreadyClockedIn as boolean | undefined;
 
-  const displayDate = new Date(today).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  const headerRight = isLectureDay
+    ? new Date(today + "T12:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }) + " · 10:00 AM"
+    : nextLecture
+    ? "Next class: " + new Date(nextLecture.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })
+    : "No upcoming lectures";
 
   return (
     <div className="glass rounded-2xl p-6 animate-slide-up">
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-xl font-bold">Clock In</h2>
-        <div className="text-sm" style={{ color: "#9ca3af" }}>
-          {displayDate} · <span className="font-mono">Class @ 10:00 AM</span>
+        <div className="text-sm font-mono" style={{ color: "#6b7280" }}>
+          {headerRight}
         </div>
       </div>
 
@@ -900,7 +909,8 @@ export default function Index() {
 
   const now = new Date();
   const isClassTime = now.getHours() >= 9 && (now.getHours() < 11 || (now.getHours() === 11 && now.getMinutes() <= 50));
-  const isLectureDay = LECTURE_SCHEDULE.some((l) => l.date === today);
+  const classOver = now.getHours() > 11 || (now.getHours() === 11 && now.getMinutes() > 50);
+  const isLectureDay = LECTURE_SCHEDULE.some((l) => l.date === today) && !classOver;
   const currentWeek = getCurrentWeek(today);
   const nextLecture = getNextLecture(today);
 
@@ -971,7 +981,7 @@ export default function Index() {
 
       {/* Content */}
       <div className="max-w-3xl mx-auto px-4 py-6 space-y-5">
-        {tab === "clockin" && <ClockInSection today={today} usersWithoutPassword={usersWithoutPassword} />}
+        {tab === "clockin" && <ClockInSection today={today} usersWithoutPassword={usersWithoutPassword} isLectureDay={isLectureDay} nextLecture={nextLecture} />}
 
         {tab === "dashboard" && (
           <>
