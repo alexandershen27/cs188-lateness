@@ -292,9 +292,9 @@ function LatenessTag({ minutes }: { minutes: number | null }) {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-const UCLA_LAT = 34.0700;
-const UCLA_LNG = -118.4452;
-const AT_LECTURE_RADIUS_KM = 1.0;
+const UCLA_LAT = 34.073471;
+const UCLA_LNG = -118.440165;
+const AT_LECTURE_RADIUS_KM = 0.05; // ~50m — must be in Perloff Hall
 
 function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
