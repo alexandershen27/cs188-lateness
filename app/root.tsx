@@ -4,6 +4,8 @@ import {
   Outlet,
   Scripts,
   ScrollRestoration,
+  isRouteErrorResponse,
+  useRouteError,
 } from "react-router";
 import type { LinksFunction } from "react-router";
 import stylesheet from "./app.css?url";
@@ -38,4 +40,34 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return <Outlet />;
+}
+
+export function ErrorBoundary() {
+  const error = useRouteError();
+  const message = isRouteErrorResponse(error)
+    ? `${error.status} ${error.statusText}: ${JSON.stringify(error.data)}`
+    : error instanceof Error
+    ? error.message
+    : String(error);
+
+  return (
+    <html lang="en">
+      <head>
+        <meta charSet="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>App Error</title>
+      </head>
+      <body style={{ fontFamily: "monospace", background: "#07070f", color: "#f87171", padding: "2rem" }}>
+        <h1 style={{ fontSize: "1.5rem", marginBottom: "1rem" }}>Application Error</h1>
+        <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", background: "#1a1a2e", padding: "1rem", borderRadius: "0.5rem" }}>
+          {message}
+        </pre>
+        {error instanceof Error && error.stack && (
+          <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", background: "#1a1a2e", padding: "1rem", borderRadius: "0.5rem", marginTop: "1rem", color: "#94a3b8", fontSize: "0.85rem" }}>
+            {error.stack}
+          </pre>
+        )}
+      </body>
+    </html>
+  );
 }
