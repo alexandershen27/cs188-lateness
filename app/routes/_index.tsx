@@ -3,12 +3,15 @@ import { data, useFetcher, useLoaderData, useRevalidator } from "react-router";
 import type { Route } from "./+types/_index";
 import { connectDB } from "~/lib/db.server";
 import { ClockIn, CorrectionRequest } from "~/lib/models.server";
-import { validateUser } from "~/lib/config.server";
+import { validateUser, getUsersWithoutPassword } from "~/lib/config.server";
 import {
   USERS,
   getLatenessMinutes,
   formatLateness,
   getLatenessQuip,
+  getCurrentWeek,
+  getNextLecture,
+  LECTURE_SCHEDULE,
 } from "~/lib/config";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -129,7 +132,9 @@ export async function loader() {
     createdAt: r.createdAt.toISOString(),
   }));
 
-  return { stats, clockIns: serialClockIns, corrections: serialCorrections, today };
+  const usersWithoutPassword = await getUsersWithoutPassword();
+
+  return { stats, clockIns: serialClockIns, corrections: serialCorrections, today, usersWithoutPassword };
 }
 
 // ── Action ───────────────────────────────────────────────────────────────────
@@ -145,7 +150,7 @@ export async function action({ request }: Route.ActionArgs) {
     const lat = fd.get("lat") ? parseFloat(fd.get("lat") as string) : null;
     const lng = fd.get("lng") ? parseFloat(fd.get("lng") as string) : null;
 
-    if (!validateUser(userId, password)) {
+    if (!await validateUser(userId, password)) {
       return data({ error: "Wrong password. Try again." }, { status: 401 });
     }
 
@@ -186,7 +191,7 @@ export async function action({ request }: Route.ActionArgs) {
     const requestedTimestamp = new Date(fd.get("requestedTimestamp") as string);
     const reason = (fd.get("reason") as string) || "";
 
-    if (!validateUser(userId, password)) {
+    if (!await validateUser(userId, password)) {
       return data({ error: "Wrong password." }, { status: 401 });
     }
 
@@ -287,7 +292,19 @@ function LatenessTag({ minutes }: { minutes: number | null }) {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function ClockInSection({ today }: { today: string }) {
+const UCLA_LAT = 34.0700;
+const UCLA_LNG = -118.4452;
+const AT_LECTURE_RADIUS_KM = 1.0;
+
+function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function ClockInSection({ today, usersWithoutPassword }: { today: string; usersWithoutPassword: string[] }) {
   const fetcher = useFetcher<typeof action>();
   const { revalidate } = useRevalidator();
   const [selectedUser, setSelectedUser] = useState<string>("");
@@ -403,7 +420,7 @@ function ClockInSection({ today }: { today: string }) {
             name="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder="Enter your password"
+            placeholder={selectedUser && usersWithoutPassword.includes(selectedUser) ? "Set a password" : "Enter your password"}
             className="w-full px-4 py-3 rounded-xl outline-none transition-all duration-200"
             style={{
               background: "rgba(255,255,255,0.05)",
@@ -427,8 +444,13 @@ function ClockInSection({ today }: { today: string }) {
               <div className="absolute inset-0 w-2 h-2 rounded-full animate-ping" style={{ background: "#fbbf24" }} />
             )}
           </div>
-          {locationStatus === "granted" && <span style={{ color: "#34d399" }}>Location captured · {location?.lat.toFixed(4)}, {location?.lng.toFixed(4)}</span>}
-          {locationStatus === "denied" && <span style={{ color: "#f97316" }}>Location denied · clocking in anyway</span>}
+          {locationStatus === "granted" && (() => {
+            const atLecture = location ? distanceKm(location.lat, location.lng, UCLA_LAT, UCLA_LNG) <= AT_LECTURE_RADIUS_KM : false;
+            return atLecture
+              ? <span style={{ color: "#34d399" }}>at lecture</span>
+              : <span style={{ color: "#f97316" }}>not at lecture</span>;
+          })()}
+          {locationStatus === "denied" && <span style={{ color: "#6b7280" }}>location not shared</span>}
           {locationStatus === "requesting" && <span>Requesting location...</span>}
           {locationStatus === "idle" && <span>Location pending</span>}
         </div>
@@ -863,12 +885,14 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Index() {
-  const { stats, clockIns, corrections, today } = useLoaderData<typeof loader>();
+  const { stats, clockIns, corrections, today, usersWithoutPassword } = useLoaderData<typeof loader>();
   const [tab, setTab] = useState<"dashboard" | "clockin" | "corrections">("clockin");
 
   const now = new Date();
-  const classHour = 10;
-  const isClassTime = now.getHours() >= classHour - 1 && now.getHours() < classHour + 3;
+  const isClassTime = now.getHours() >= 9 && (now.getHours() < 11 || (now.getHours() === 11 && now.getMinutes() <= 50));
+  const isLectureDay = LECTURE_SCHEDULE.some((l) => l.date === today);
+  const currentWeek = getCurrentWeek(today);
+  const nextLecture = getNextLecture(today);
 
   const tabs = [
     { id: "clockin", label: "Clock In", badge: null },
@@ -885,7 +909,10 @@ export default function Index() {
             <div>
               <h1 className="text-2xl font-black tracking-tight gradient-text">CS 188 Tracker</h1>
               <p className="text-xs mt-0.5" style={{ color: "#4b5563" }}>
-                Human-AI Interaction · Lectures @ 10:00 AM
+                Human-AI Interaction · Week {currentWeek} of 10
+                {nextLecture && !isLectureDay && (
+                  <span> · Next: {new Date(nextLecture.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</span>
+                )}
               </p>
             </div>
             <div className="text-right">
@@ -934,7 +961,7 @@ export default function Index() {
 
       {/* Content */}
       <div className="max-w-3xl mx-auto px-4 py-6 space-y-5">
-        {tab === "clockin" && <ClockInSection today={today} />}
+        {tab === "clockin" && <ClockInSection today={today} usersWithoutPassword={usersWithoutPassword} />}
 
         {tab === "dashboard" && (
           <>

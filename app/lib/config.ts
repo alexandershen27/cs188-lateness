@@ -10,6 +10,40 @@ export type UserId = keyof typeof USERS;
 
 export const CLASS_HOUR = 10;
 export const CLASS_MINUTE = 0;
+export const CLASS_END_HOUR = 11;
+export const CLASS_END_MINUTE = 50;
+
+// Tue/Thu schedule, weeks 1–10. Week 1 had only Thu (first day of class).
+export const LECTURE_SCHEDULE: { week: number; date: string }[] = [
+  { week: 1,  date: "2026-04-02" },
+  { week: 2,  date: "2026-04-07" },
+  { week: 2,  date: "2026-04-09" },
+  { week: 3,  date: "2026-04-14" },
+  { week: 3,  date: "2026-04-16" },
+  { week: 4,  date: "2026-04-21" },
+  { week: 4,  date: "2026-04-23" },
+  { week: 5,  date: "2026-04-28" },
+  { week: 5,  date: "2026-04-30" },
+  { week: 6,  date: "2026-05-05" },
+  { week: 6,  date: "2026-05-07" },
+  { week: 7,  date: "2026-05-12" },
+  { week: 7,  date: "2026-05-14" },
+  { week: 8,  date: "2026-05-19" },
+  { week: 8,  date: "2026-05-21" },
+  { week: 9,  date: "2026-05-28" },
+  { week: 9,  date: "2026-05-29" },
+  { week: 10, date: "2026-06-02" },
+  { week: 10, date: "2026-06-04" },
+];
+
+export function getCurrentWeek(today: string): number {
+  const past = LECTURE_SCHEDULE.filter((l) => l.date <= today);
+  return past.length > 0 ? past[past.length - 1].week : 1;
+}
+
+export function getNextLecture(today: string): { week: number; date: string } | null {
+  return LECTURE_SCHEDULE.find((l) => l.date > today) ?? null;
+}
 
 export function getLatenessMinutes(timestamp: Date | string): number {
   const ts = typeof timestamp === "string" ? new Date(timestamp) : timestamp;

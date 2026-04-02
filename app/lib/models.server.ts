@@ -60,3 +60,18 @@ export const ClockIn =
 export const CorrectionRequest =
   (mongoose.models.CorrectionRequest as mongoose.Model<ICorrectionRequest>) ||
   mongoose.model<ICorrectionRequest>("CorrectionRequest", CorrectionRequestSchema);
+
+// ── UserPassword ─────────────────────────────────────────────────────────────
+export interface IUserPassword {
+  userId: string;
+  password: string;
+}
+
+const UserPasswordSchema = new mongoose.Schema<IUserPassword>({
+  userId: { type: String, required: true, unique: true, enum: ["keshiv", "alex", "vivek"] },
+  password: { type: String, required: true },
+});
+
+export const UserPassword =
+  (mongoose.models.UserPassword as mongoose.Model<IUserPassword>) ||
+  mongoose.model<IUserPassword>("UserPassword", UserPasswordSchema);
