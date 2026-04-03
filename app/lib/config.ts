@@ -13,7 +13,14 @@ export const CLASS_MINUTE = 0;
 export const CLASS_END_HOUR = 11;
 export const CLASS_END_MINUTE = 50;
 
-// Tue/Thu schedule, weeks 1–10. Week 1 had only Thu (first day of class).
+// First day of official tracking (absences count from here)
+export const FIRST_TRACKED_LECTURE = "2026-04-07";
+
+// Penalty applied to stats for a missed lecture
+export const ABSENCE_PENALTY_MINUTES = 110;
+
+// Tue/Thu schedule weeks 1–10. April 2 was intro day (week 1, no absence tracking).
+// Official lectures start April 7 (week 2).
 export const LECTURE_SCHEDULE: { week: number; date: string }[] = [
   { week: 1,  date: "2026-04-02" },
   { week: 2,  date: "2026-04-07" },
@@ -30,8 +37,8 @@ export const LECTURE_SCHEDULE: { week: number; date: string }[] = [
   { week: 7,  date: "2026-05-14" },
   { week: 8,  date: "2026-05-19" },
   { week: 8,  date: "2026-05-21" },
+  { week: 9,  date: "2026-05-26" },
   { week: 9,  date: "2026-05-28" },
-  { week: 9,  date: "2026-05-29" },
   { week: 10, date: "2026-06-02" },
   { week: 10, date: "2026-06-04" },
 ];
@@ -45,11 +52,22 @@ export function getNextLecture(today: string): { week: number; date: string } | 
   return LECTURE_SCHEDULE.find((l) => l.date > today) ?? null;
 }
 
+// Returns official lectures that have fully passed (date < today, or date === today and class is over)
+export function getCompletedOfficialLectures(today: string, classIsOver: boolean): string[] {
+  return LECTURE_SCHEDULE
+    .filter((l) => l.date >= FIRST_TRACKED_LECTURE)
+    .filter((l) => l.date < today || (l.date === today && classIsOver))
+    .map((l) => l.date);
+}
+
+// Uses the LA-time toLocaleString trick so the difference is correct regardless of server timezone.
 export function getLatenessMinutes(timestamp: Date | string): number {
   const ts = typeof timestamp === "string" ? new Date(timestamp) : timestamp;
-  const classStart = new Date(ts);
+  const laString = ts.toLocaleString("en-US", { timeZone: "America/Los_Angeles" });
+  const tsLA = new Date(laString);
+  const classStart = new Date(tsLA);
   classStart.setHours(CLASS_HOUR, CLASS_MINUTE, 0, 0);
-  return (ts.getTime() - classStart.getTime()) / 60000;
+  return (tsLA.getTime() - classStart.getTime()) / 60000;
 }
 
 export function formatLateness(minutes: number): string {

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { data, useFetcher, useLoaderData, useRevalidator } from "react-router";
+import { data, useFetcher, useLoaderData, useRevalidator, useNavigate } from "react-router";
 import type { Route } from "./+types/_index";
 import { connectDB } from "~/lib/db.server";
 import { ClockIn, CorrectionRequest } from "~/lib/models.server";
@@ -12,6 +12,8 @@ import {
   getCurrentWeek,
   getNextLecture,
   LECTURE_SCHEDULE,
+  getCompletedOfficialLectures,
+  ABSENCE_PENALTY_MINUTES,
 } from "~/lib/config";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -30,6 +32,9 @@ interface UserStats {
   lastClockIn: string | null;
   todayClockedIn: boolean;
   todayLateness: number | null;
+  attended: number;
+  absences: number;
+  totalTracked: number;
 }
 
 interface SerialClockIn {
@@ -58,29 +63,40 @@ interface SerialCorrection {
 // ── Loader ───────────────────────────────────────────────────────────────────
 
 export async function loader({ request }: Route.LoaderArgs) {
-  const devMode = new URL(request.url).searchParams.get("dev") === "1";
+  const params = new URL(request.url).searchParams;
+  const devMode = params.get("dev") === "1";
+  const mockDate = devMode ? params.get("mockDate") : null;
+
   try {
     await connectDB();
   } catch (error) {
     throw new Response(error instanceof Error ? error.message : String(error), { status: 500 });
   }
 
-  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
+  const today = mockDate ?? new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
+
+  // Determine if class is over for today (needed for absence tracking)
+  const nowLA = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
+  const classIsOver = nowLA.getHours() > 11 || (nowLA.getHours() === 11 && nowLA.getMinutes() >= 50);
+
+  const completedLectures = getCompletedOfficialLectures(today, classIsOver);
 
   const allClockIns = await ClockIn.find().sort({ timestamp: 1 }).lean();
-  const pendingCorrections = await CorrectionRequest.find({ status: "pending" })
-    .sort({ createdAt: -1 })
-    .lean();
+  const allCorrections = await CorrectionRequest.find().sort({ createdAt: -1 }).lean();
 
   // Build per-user stats
   const stats: UserStats[] = Object.values(USERS).map((user) => {
     const userClockIns = allClockIns.filter((c) => c.userId === user.id);
     const todayClockIn = userClockIns.find((c) => c.date === today);
+    const clockInDates = new Set(userClockIns.map((c) => c.date));
 
-    const latenesses = userClockIns.map((c) => {
-      const effective = c.correctedTimestamp ?? c.timestamp;
-      return getLatenessMinutes(effective);
-    });
+    const attended = completedLectures.filter((d) => clockInDates.has(d)).length;
+    const absences = completedLectures.filter((d) => !clockInDates.has(d)).length;
+
+    const latenesses = userClockIns.map((c) => getLatenessMinutes(c.correctedTimestamp ?? c.timestamp));
+
+    // Average includes absence penalty
+    const allForAvg = [...latenesses, ...Array(absences).fill(ABSENCE_PENALTY_MINUTES)];
 
     const todayLateness = todayClockIn
       ? getLatenessMinutes(todayClockIn.correctedTimestamp ?? todayClockIn.timestamp)
@@ -93,23 +109,25 @@ export async function loader({ request }: Route.LoaderArgs) {
       glow: user.glow,
       emoji: user.emoji,
       totalClockIns: userClockIns.length,
-      averageLateness: latenesses.length
-        ? latenesses.reduce((a, b) => a + b, 0) / latenesses.length
+      averageLateness: allForAvg.length
+        ? allForAvg.reduce((a, b) => a + b, 0) / allForAvg.length
         : null,
       bestLateness: latenesses.length ? Math.min(...latenesses) : null,
       worstLateness: latenesses.length ? Math.max(...latenesses) : null,
-      onTimeRate: latenesses.length
-        ? (latenesses.filter((l) => l <= 5).length / latenesses.length) * 100
+      onTimeRate: allForAvg.length
+        ? (allForAvg.filter((l) => l <= 5).length / allForAvg.length) * 100
         : null,
       lastClockIn: userClockIns.length
         ? (userClockIns[userClockIns.length - 1].correctedTimestamp ?? userClockIns[userClockIns.length - 1].timestamp).toISOString()
         : null,
       todayClockedIn: !!todayClockIn,
       todayLateness,
+      attended,
+      absences,
+      totalTracked: completedLectures.length,
     };
   });
 
-  // Serialize clock-ins for client (for corrections UI)
   const serialClockIns: SerialClockIn[] = allClockIns.map((c) => ({
     id: c._id.toString(),
     userId: c.userId,
@@ -120,7 +138,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     latenessMinutes: getLatenessMinutes(c.correctedTimestamp ?? c.timestamp),
   }));
 
-  const serialCorrections: SerialCorrection[] = pendingCorrections.map((r) => ({
+  const serialCorrections: SerialCorrection[] = allCorrections.map((r) => ({
     id: r._id.toString(),
     clockInId: r.clockInId.toString(),
     clockInUserId: r.clockInUserId,
@@ -144,7 +162,6 @@ export async function action({ request }: Route.ActionArgs) {
   await connectDB();
   const fd = await request.formData();
   const intent = fd.get("intent") as string;
-
   const devMode = fd.get("devMode") === "1";
 
   if (intent === "clockin") {
@@ -169,17 +186,19 @@ export async function action({ request }: Route.ActionArgs) {
     }
 
     const now = mockTimeRaw ? new Date(mockTimeRaw) : new Date();
-    const date = new Date(now).toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
+
+    // Block clock-in if class is over (past 11:50 AM PT)
+    const nowLA = new Date(now.toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
+    if (nowLA.getHours() > 11 || (nowLA.getHours() === 11 && nowLA.getMinutes() >= 50)) {
+      return data({ error: "Class has ended. Clock-in is only open 10:00–11:50 AM." }, { status: 400 });
+    }
+
+    const date = now.toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
 
     const existing = await ClockIn.findOne({ userId, date });
     if (existing) {
       const lateness = getLatenessMinutes(existing.correctedTimestamp ?? existing.timestamp);
-      return data({
-        alreadyClockedIn: true,
-        lateness,
-        quip: getLatenessQuip(lateness),
-        latenessStr: formatLateness(lateness),
-      });
+      return data({ alreadyClockedIn: true, lateness, quip: getLatenessQuip(lateness), latenessStr: formatLateness(lateness) });
     }
 
     const clockIn = await ClockIn.create({
@@ -190,12 +209,7 @@ export async function action({ request }: Route.ActionArgs) {
     });
 
     const lateness = getLatenessMinutes(clockIn.timestamp);
-    return data({
-      success: true,
-      lateness,
-      quip: getLatenessQuip(lateness),
-      latenessStr: formatLateness(lateness),
-    });
+    return data({ success: true, lateness, quip: getLatenessQuip(lateness), latenessStr: formatLateness(lateness) });
   }
 
   if (intent === "request-correction") {
@@ -244,10 +258,7 @@ export async function action({ request }: Route.ActionArgs) {
     correction.approvedBy = approverId;
     await correction.save();
 
-    await ClockIn.findByIdAndUpdate(correction.clockInId, {
-      correctedTimestamp: correction.requestedTimestamp,
-    });
-
+    await ClockIn.findByIdAndUpdate(correction.clockInId, { correctedTimestamp: correction.requestedTimestamp });
     return data({ success: true, message: "Correction approved!" });
   }
 
@@ -269,15 +280,21 @@ export async function action({ request }: Route.ActionArgs) {
     correction.status = "rejected";
     correction.approvedBy = approverId;
     await correction.save();
-
     return data({ success: true, message: "Correction rejected." });
   }
 
   if (intent === "dev-delete-clockin" && devMode) {
     const userId = fd.get("userId") as string;
-    const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
-    await ClockIn.deleteOne({ userId, date: today });
-    return data({ success: true, message: `Deleted clock-in for ${userId}` });
+    const mockDate = fd.get("mockDate") as string | null;
+    const date = mockDate ?? new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
+    await ClockIn.deleteOne({ userId, date });
+    return data({ success: true });
+  }
+
+  if (intent === "dev-clear-db" && devMode) {
+    await ClockIn.deleteMany({});
+    await CorrectionRequest.deleteMany({});
+    return data({ success: true });
   }
 
   return data({ error: "Unknown intent." }, { status: 400 });
@@ -313,9 +330,9 @@ function LatenessTag({ minutes }: { minutes: number | null }) {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-const UCLA_LAT = 34.073471;
-const UCLA_LNG = -118.440165;
-const AT_LECTURE_RADIUS_KM = 0.05; // ~50m — must be in Perloff Hall
+const PERLOFF_LAT = 34.073471;
+const PERLOFF_LNG = -118.440165;
+const AT_LECTURE_RADIUS_KM = 0.05;
 
 function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
@@ -323,6 +340,17 @@ function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number): num
   const dLng = (lng2 - lng1) * Math.PI / 180;
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function LocationPill({ present }: { present: boolean }) {
+  const color = present ? "#34d399" : "#fbbf24";
+  const bg = present ? "rgba(52,211,153,0.1)" : "rgba(251,191,36,0.1)";
+  const border = present ? "rgba(52,211,153,0.25)" : "rgba(251,191,36,0.25)";
+  return (
+    <span className="px-2 py-0.5 rounded-full text-xs font-medium" style={{ color, background: bg, border: `1px solid ${border}` }}>
+      {present ? "in Perloff" : "not in Perloff"}
+    </span>
+  );
 }
 
 function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture, devMode }: {
@@ -334,80 +362,101 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
 }) {
   const fetcher = useFetcher<typeof action>();
   const deleteFetcher = useFetcher<typeof action>();
+  const clearFetcher = useFetcher<typeof action>();
   const { revalidate } = useRevalidator();
+  const navigate = useNavigate();
+
   const [selectedUser, setSelectedUser] = useState<string>("");
   const [password, setPassword] = useState("");
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [locationStatus, setLocationStatus] = useState<"idle" | "requesting" | "granted" | "denied">("idle");
-  const [showSuccess, setShowSuccess] = useState(false);
-  const prevSubmitting = useRef(false);
   const [bypassLocation, setBypassLocation] = useState(true);
   const [mockTime, setMockTime] = useState("");
 
-  const atLecture = devMode && bypassLocation
-    ? true
-    : locationStatus === "granted" && location
-    ? distanceKm(location.lat, location.lng, UCLA_LAT, UCLA_LNG) <= AT_LECTURE_RADIUS_KM
-    : null;
+  const prevSubmitting = useRef(false);
+
+  // Revalidate after successful clock-in or delete
+  useEffect(() => {
+    const wasSubmitting = prevSubmitting.current;
+    const isNowIdle = fetcher.state === "idle";
+    if (wasSubmitting && isNowIdle && fetcher.data && !("error" in fetcher.data)) {
+      setPassword("");
+      revalidate();
+    }
+    prevSubmitting.current = fetcher.state === "submitting";
+  }, [fetcher.state, fetcher.data]);
 
   useEffect(() => {
     if (locationStatus === "idle") {
       setLocationStatus("requesting");
       navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-          setLocationStatus("granted");
-        },
+        (pos) => { setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude }); setLocationStatus("granted"); },
         () => setLocationStatus("denied")
       );
     }
   }, []);
 
-  useEffect(() => {
-    const wasSubmitting = prevSubmitting.current;
-    const isNowIdle = fetcher.state === "idle";
-    if (wasSubmitting && isNowIdle && fetcher.data && !("error" in fetcher.data)) {
-      setShowSuccess(true);
-      setPassword("");
-      revalidate();
-      setTimeout(() => setShowSuccess(false), 6000);
-    }
-    prevSubmitting.current = fetcher.state === "submitting";
-  }, [fetcher.state, fetcher.data]);
+  const atLecture = devMode && bypassLocation
+    ? true
+    : locationStatus === "granted" && location
+    ? distanceKm(location.lat, location.lng, PERLOFF_LAT, PERLOFF_LNG) <= AT_LECTURE_RADIUS_KM
+    : null;
+
+  // Compute class-over using mockTime if set, else real LA time
+  const effectiveTimeLA = mockTime
+    ? new Date(new Date(mockTime).toLocaleString("en-US", { timeZone: "America/Los_Angeles" }))
+    : new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
+  const classEnded = effectiveTimeLA.getHours() > 11 || (effectiveTimeLA.getHours() === 11 && effectiveTimeLA.getMinutes() >= 50);
 
   const responseData = fetcher.data as Record<string, unknown> | undefined;
   const error = responseData?.error as string | undefined;
-  const success = (responseData?.success || responseData?.alreadyClockedIn) as boolean | undefined;
+  const success = responseData?.success as boolean | undefined;
+  const alreadyClockedIn = responseData?.alreadyClockedIn as boolean | undefined;
   const quip = responseData?.quip as string | undefined;
   const latenessStr = responseData?.latenessStr as string | undefined;
-  const alreadyClockedIn = responseData?.alreadyClockedIn as boolean | undefined;
 
   const headerRight = isLectureDay
     ? new Date(today + "T12:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }) + " · 10:00 AM"
     : nextLecture
-    ? "Next class: " + new Date(nextLecture.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })
+    ? "Next: " + new Date(nextLecture.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })
     : "No upcoming lectures";
+
+  const dotColor = locationStatus === "requesting" ? "#fbbf24"
+    : locationStatus === "denied" ? "#6b7280"
+    : atLecture === true ? "#34d399"
+    : "#fbbf24";
+
+  const buttonDisabled = !selectedUser || !password || fetcher.state === "submitting" || atLecture === false || classEnded;
+  const buttonLabel = fetcher.state === "submitting" ? "Clocking in..."
+    : classEnded ? "Class ended"
+    : atLecture === false ? "Not in Perloff"
+    : "🕙 CLOCK IN";
+
+  // Sync mockTime date to URL so the whole page updates
+  const mockDateForURL = mockTime ? mockTime.slice(0, 10) : null;
+  const applyMockDate = () => {
+    if (mockDateForURL) navigate(`?dev=1&mockDate=${mockDateForURL}`, { replace: true });
+  };
 
   return (
     <div className="glass rounded-2xl p-6 animate-slide-up">
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-xl font-bold">Clock In</h2>
-        <div className="text-sm font-mono" style={{ color: "#6b7280" }}>
-          {headerRight}
-        </div>
+        <div className="text-sm font-mono" style={{ color: "#6b7280" }}>{headerRight}</div>
       </div>
 
-      {showSuccess && success && !alreadyClockedIn && (
-        <div className="mb-4 p-4 rounded-xl text-center animate-bounce-in" style={{ background: "rgba(52,211,153,0.12)", border: "1px solid rgba(52,211,153,0.3)" }}>
+      {/* Success feedback */}
+      {fetcher.state === "idle" && success && !alreadyClockedIn && (
+        <div className="mb-4 p-4 rounded-xl text-center" style={{ background: "rgba(52,211,153,0.12)", border: "1px solid rgba(52,211,153,0.3)" }}>
           <div className="text-2xl mb-1">{quip?.split(" ")[0]}</div>
           <div className="font-bold text-lg" style={{ color: "#34d399" }}>{latenessStr}</div>
           <div className="text-sm mt-1" style={{ color: "#9ca3af" }}>{quip?.slice(quip.indexOf(" ") + 1)}</div>
         </div>
       )}
 
-      {alreadyClockedIn && success && (
+      {fetcher.state === "idle" && alreadyClockedIn && (
         <div className="mb-4 p-4 rounded-xl text-center" style={{ background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.3)" }}>
-          <div className="font-semibold" style={{ color: "#fbbf24" }}>Already clocked in today — {latenessStr}</div>
+          <div className="font-semibold" style={{ color: "#fbbf24" }}>Already clocked in — {latenessStr}</div>
           <div className="text-sm mt-1" style={{ color: "#9ca3af" }}>{quip}</div>
         </div>
       )}
@@ -465,102 +514,93 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
             onChange={(e) => setPassword(e.target.value)}
             placeholder={selectedUser && usersWithoutPassword.includes(selectedUser) ? "Set a password" : "Enter your password"}
             className="w-full px-4 py-3 rounded-xl outline-none transition-all duration-200"
-            style={{
-              background: "rgba(255,255,255,0.05)",
-              border: "1px solid rgba(255,255,255,0.1)",
-              color: "white",
-              fontFamily: "JetBrains Mono, monospace",
-            }}
+            style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", fontFamily: "JetBrains Mono, monospace" }}
           />
         </div>
 
         {/* Location status */}
-        {(() => {
-          const dotColor = locationStatus === "requesting"
-            ? "#fbbf24"
-            : locationStatus === "denied"
-            ? "#6b7280"
-            : atLecture === true
-            ? "#34d399"
-            : "#fbbf24";
+        <div className="flex items-center gap-2 text-sm" style={{ color: "#6b7280" }}>
+          <div className="relative w-2 h-2 flex-shrink-0">
+            <div className="w-2 h-2 rounded-full" style={{ background: dotColor }} />
+            {locationStatus === "requesting" && (
+              <div className="absolute inset-0 w-2 h-2 rounded-full animate-ping" style={{ background: dotColor }} />
+            )}
+          </div>
+          {locationStatus === "granted" && atLecture !== null && <LocationPill present={atLecture} />}
+          {locationStatus === "denied" && <span>location not shared</span>}
+          {locationStatus === "requesting" && <span>Requesting location...</span>}
+          {locationStatus === "idle" && <span>Location pending</span>}
+        </div>
 
-          return (
-            <div className="flex items-center gap-2 text-sm" style={{ color: "#6b7280" }}>
-              <div className="relative w-2 h-2 flex-shrink-0">
-                <div className="w-2 h-2 rounded-full" style={{ background: dotColor }} />
-                {locationStatus === "requesting" && (
-                  <div className="absolute inset-0 w-2 h-2 rounded-full animate-ping" style={{ background: dotColor }} />
-                )}
-              </div>
-              {locationStatus === "granted" && atLecture === true && (
-                <span className="px-2 py-0.5 rounded-full text-xs font-medium" style={{ background: "rgba(52,211,153,0.1)", color: "#34d399", border: "1px solid rgba(52,211,153,0.2)" }}>
-                  at lecture
-                </span>
-              )}
-              {locationStatus === "granted" && atLecture === false && <span>not at lecture</span>}
-              {locationStatus === "denied" && <span>location not shared</span>}
-              {locationStatus === "requesting" && <span>Requesting location...</span>}
-              {locationStatus === "idle" && <span>Location pending</span>}
-            </div>
-          );
-        })()}
-
+        {/* Dev overrides */}
         {devMode && (
           <div className="space-y-3 p-3 rounded-xl" style={{ background: "rgba(251,191,36,0.06)", border: "1px solid rgba(251,191,36,0.2)" }}>
-            <div className="text-xs font-semibold mb-2" style={{ color: "#fbbf24" }}>Dev overrides</div>
+            <div className="text-xs font-semibold" style={{ color: "#fbbf24" }}>Dev overrides</div>
             <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "#9ca3af" }}>
-              <input
-                type="checkbox"
-                checked={bypassLocation}
-                onChange={(e) => setBypassLocation(e.target.checked)}
-                className="accent-yellow-400"
-              />
-              Simulate being at Perloff Hall
+              <input type="checkbox" checked={bypassLocation} onChange={(e) => setBypassLocation(e.target.checked)} className="accent-yellow-400" />
+              Simulate being in Perloff Hall
             </label>
             <div>
-              <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Override clock-in time (leave blank for now)</label>
-              <input
-                type="datetime-local"
-                value={mockTime}
-                onChange={(e) => setMockTime(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-                style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", colorScheme: "dark" }}
-              />
+              <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Mock date/time (affects whole page)</label>
+              <div className="flex gap-2">
+                <input
+                  type="datetime-local"
+                  value={mockTime}
+                  onChange={(e) => setMockTime(e.target.value)}
+                  className="flex-1 px-3 py-2 rounded-lg text-sm outline-none"
+                  style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", colorScheme: "dark" }}
+                />
+                <button
+                  type="button"
+                  onClick={applyMockDate}
+                  disabled={!mockDateForURL}
+                  className="px-3 py-2 rounded-lg text-xs font-semibold disabled:opacity-40"
+                  style={{ background: "rgba(251,191,36,0.15)", color: "#fbbf24", border: "1px solid rgba(251,191,36,0.3)" }}
+                >
+                  Apply
+                </button>
+              </div>
             </div>
           </div>
         )}
 
         <button
           type="submit"
-          disabled={!selectedUser || !password || fetcher.state === "submitting" || atLecture === false}
+          disabled={buttonDisabled}
           className="btn-clockin w-full py-4 rounded-xl font-bold text-lg text-white transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed disabled:transform-none relative overflow-hidden"
         >
-          <span className="relative z-10">
-            {fetcher.state === "submitting" ? "Clocking in..." : atLecture === false ? "Not at lecture" : "🕙 CLOCK IN"}
-          </span>
+          <span className="relative z-10">{buttonLabel}</span>
         </button>
       </fetcher.Form>
 
+      {/* Dev: delete clock-ins + clear db */}
       {devMode && (
-        <div className="mt-4 pt-4 border-t" style={{ borderColor: "rgba(251,191,36,0.15)" }}>
-          <div className="text-xs font-semibold mb-2" style={{ color: "#fbbf24" }}>Delete today's clock-in</div>
-          <div className="flex gap-2">
-            {Object.values(USERS).map((user) => (
-              <deleteFetcher.Form key={user.id} method="post" className="flex-1">
-                <input type="hidden" name="intent" value="dev-delete-clockin" />
-                <input type="hidden" name="devMode" value="1" />
-                <input type="hidden" name="userId" value={user.id} />
-                <button
-                  type="submit"
-                  onClick={() => setTimeout(revalidate, 100)}
-                  className="w-full py-1.5 rounded-lg text-xs font-medium transition-all"
-                  style={{ background: "rgba(239,68,68,0.1)", color: "#ef4444", border: "1px solid rgba(239,68,68,0.2)" }}
-                >
-                  {user.emoji} {user.name}
-                </button>
-              </deleteFetcher.Form>
-            ))}
+        <div className="mt-4 pt-4 border-t space-y-3" style={{ borderColor: "rgba(251,191,36,0.15)" }}>
+          <div>
+            <div className="text-xs font-semibold mb-2" style={{ color: "#fbbf24" }}>Delete today's clock-in</div>
+            <div className="flex gap-2">
+              {Object.values(USERS).map((user) => (
+                <deleteFetcher.Form key={user.id} method="post" className="flex-1" onSubmit={() => setTimeout(revalidate, 150)}>
+                  <input type="hidden" name="intent" value="dev-delete-clockin" />
+                  <input type="hidden" name="devMode" value="1" />
+                  <input type="hidden" name="userId" value={user.id} />
+                  {mockDateForURL && <input type="hidden" name="mockDate" value={mockDateForURL} />}
+                  <button type="submit" className="w-full py-1.5 rounded-lg text-xs font-medium transition-all"
+                    style={{ background: "rgba(239,68,68,0.1)", color: "#ef4444", border: "1px solid rgba(239,68,68,0.2)" }}>
+                    {user.emoji} {user.name}
+                  </button>
+                </deleteFetcher.Form>
+              ))}
+            </div>
           </div>
+          <clearFetcher.Form method="post" onSubmit={() => setTimeout(revalidate, 150)}>
+            <input type="hidden" name="intent" value="dev-clear-db" />
+            <input type="hidden" name="devMode" value="1" />
+            <button type="submit" className="w-full py-1.5 rounded-lg text-xs font-medium transition-all"
+              style={{ background: "rgba(239,68,68,0.06)", color: "#9ca3af", border: "1px solid rgba(239,68,68,0.15)" }}>
+              ☠ Clear entire database
+            </button>
+          </clearFetcher.Form>
         </div>
       )}
     </div>
@@ -571,27 +611,20 @@ function Leaderboard({ stats }: { stats: UserStats[] }) {
   const ranked = [...stats]
     .filter((s) => s.averageLateness !== null)
     .sort((a, b) => (a.averageLateness ?? 0) - (b.averageLateness ?? 0));
-
   const unranked = stats.filter((s) => s.averageLateness === null);
   const allRanked = [...ranked, ...unranked];
 
-  const rankStyles = ["rank-1", "rank-2", "rank-3"];
   const rankLabels = ["🥇", "🥈", "🥉"];
   const rankTitles = ["Most Punctual", "Second Best", "Room to Grow"];
+  const rankStyles = ["rank-1", "rank-2", "rank-3"];
 
   return (
     <div className="glass rounded-2xl p-6 animate-slide-up" style={{ animationDelay: "0.1s" }}>
       <h2 className="text-xl font-bold mb-5">Leaderboard</h2>
       <div className="space-y-3">
         {allRanked.map((user, i) => (
-          <div
-            key={user.userId}
-            className="flex items-center gap-4 p-4 rounded-xl transition-all"
-            style={{
-              background: "rgba(255,255,255,0.03)",
-              border: `1px solid ${i === 0 ? "rgba(245,158,11,0.3)" : "rgba(255,255,255,0.06)"}`,
-            }}
-          >
+          <div key={user.userId} className="flex items-center gap-4 p-4 rounded-xl transition-all"
+            style={{ background: "rgba(255,255,255,0.03)", border: `1px solid ${i === 0 ? "rgba(245,158,11,0.3)" : "rgba(255,255,255,0.06)"}` }}>
             <div className={`${rankStyles[i] || ""} w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold flex-shrink-0`}
               style={i >= 3 ? { background: "rgba(255,255,255,0.08)" } : {}}>
               {rankLabels[i] || `#${i + 1}`}
@@ -603,8 +636,9 @@ function Leaderboard({ stats }: { stats: UserStats[] }) {
                 {i < 3 && <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(255,255,255,0.05)", color: "#6b7280" }}>{rankTitles[i]}</span>}
               </div>
               <div className="text-xs mt-0.5" style={{ color: "#6b7280" }}>
-                {user.totalClockIns} class{user.totalClockIns !== 1 ? "es" : ""}
-                {user.onTimeRate !== null && ` · ${user.onTimeRate.toFixed(0)}% on time`}
+                {user.totalTracked > 0
+                  ? `${user.attended}/${user.totalTracked} present${user.absences > 0 ? ` · ${user.absences} absent` : ""}`
+                  : `${user.totalClockIns} clock-in${user.totalClockIns !== 1 ? "s" : ""}`}
               </div>
             </div>
             <div className="text-right flex-shrink-0">
@@ -632,19 +666,11 @@ function StatsCards({ stats }: { stats: UserStats[] }) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
       {stats.map((user, i) => (
-        <div
-          key={user.userId}
-          className="glass rounded-2xl p-5 animate-slide-up"
-          style={{
-            animationDelay: `${i * 0.08}s`,
-            borderColor: user.color + "33",
-          }}
-        >
+        <div key={user.userId} className="glass rounded-2xl p-5 animate-slide-up"
+          style={{ animationDelay: `${i * 0.08}s`, borderColor: user.color + "33" }}>
           <div className="flex items-center gap-3 mb-4">
-            <div
-              className="w-10 h-10 rounded-full flex items-center justify-center text-xl"
-              style={{ background: user.color + "22", boxShadow: `0 0 16px ${user.glow}` }}
-            >
+            <div className="w-10 h-10 rounded-full flex items-center justify-center text-xl"
+              style={{ background: user.color + "22", boxShadow: `0 0 16px ${user.glow}` }}>
               {user.emoji}
             </div>
             <div>
@@ -653,7 +679,8 @@ function StatsCards({ stats }: { stats: UserStats[] }) {
             </div>
             {user.todayClockedIn && (
               <div className="ml-auto">
-                <div className="text-xs px-2 py-1 rounded-full font-medium" style={{ background: "rgba(52,211,153,0.1)", color: "#34d399", border: "1px solid rgba(52,211,153,0.2)" }}>
+                <div className="text-xs px-2 py-1 rounded-full font-medium"
+                  style={{ background: "rgba(52,211,153,0.1)", color: "#34d399", border: "1px solid rgba(52,211,153,0.2)" }}>
                   ✓ Today
                 </div>
               </div>
@@ -680,6 +707,15 @@ function StatsCards({ stats }: { stats: UserStats[] }) {
                   {user.worstLateness !== null ? formatLateness(user.worstLateness) : "—"}
                 </span>
               </div>
+              {user.totalTracked > 0 && (
+                <div className="flex justify-between items-center">
+                  <span className="text-xs" style={{ color: "#6b7280" }}>Attendance</span>
+                  <span className="text-xs font-mono" style={{ color: user.absences > 0 ? "#ef4444" : "#34d399" }}>
+                    {user.attended}/{user.totalTracked}
+                    {user.absences > 0 && ` (${user.absences} absent)`}
+                  </span>
+                </div>
+              )}
               {user.onTimeRate !== null && (
                 <div>
                   <div className="flex justify-between text-xs mb-1" style={{ color: "#6b7280" }}>
@@ -687,7 +723,8 @@ function StatsCards({ stats }: { stats: UserStats[] }) {
                     <span style={{ color: user.color }}>{user.onTimeRate.toFixed(0)}%</span>
                   </div>
                   <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.06)" }}>
-                    <div className="h-full rounded-full transition-all duration-700" style={{ width: `${user.onTimeRate}%`, background: `linear-gradient(90deg, ${user.color}, ${user.color}88)` }} />
+                    <div className="h-full rounded-full transition-all duration-700"
+                      style={{ width: `${user.onTimeRate}%`, background: `linear-gradient(90deg, ${user.color}, ${user.color}88)` }} />
                   </div>
                 </div>
               )}
@@ -701,9 +738,7 @@ function StatsCards({ stats }: { stats: UserStats[] }) {
               )}
             </div>
           ) : (
-            <div className="text-center py-4 text-sm" style={{ color: "#4b5563" }}>
-              No lectures recorded yet
-            </div>
+            <div className="text-center py-4 text-sm" style={{ color: "#4b5563" }}>No lectures recorded yet</div>
           )}
         </div>
       ))}
@@ -731,14 +766,9 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
     if (wasSubmitting && isNowIdle && fetcher.data && !("error" in (fetcher.data as object))) {
       revalidate();
       setMode(null);
-      setSelectedClockIn("");
-      setRequestedTime("");
-      setReason("");
-      setRequestUserId("");
-      setRequestPassword("");
-      setApproverId("");
-      setApproverPassword("");
-      setSelectedCorrectionId("");
+      setSelectedClockIn(""); setRequestedTime(""); setReason("");
+      setRequestUserId(""); setRequestPassword("");
+      setApproverId(""); setApproverPassword(""); setSelectedCorrectionId("");
     }
     prevSubmitting.current = fetcher.state === "submitting";
   }, [fetcher.state, fetcher.data]);
@@ -748,34 +778,37 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
   const successMsg = responseData?.message as string | undefined;
 
   const myClockIns = clockIns.filter((c) => c.userId === requestUserId);
+  const pending = corrections.filter((c) => c.status === "pending");
+
+  const statusStyle = (status: string) => {
+    if (status === "approved") return { background: "rgba(52,211,153,0.1)", color: "#34d399" };
+    if (status === "rejected") return { background: "rgba(239,68,68,0.1)", color: "#ef4444" };
+    return { background: "rgba(251,191,36,0.1)", color: "#fbbf24" };
+  };
 
   return (
     <div className="glass rounded-2xl p-6 animate-slide-up" style={{ animationDelay: "0.2s" }}>
       <div className="flex items-center justify-between mb-5">
         <h2 className="text-xl font-bold">Corrections</h2>
         <div className="flex gap-2">
-          <button
-            onClick={() => setMode(mode === "request" ? null : "request")}
+          <button onClick={() => setMode(mode === "request" ? null : "request")}
             className="px-3 py-1.5 rounded-lg text-sm font-medium transition-all"
             style={{
               background: mode === "request" ? "rgba(167,139,250,0.2)" : "rgba(255,255,255,0.05)",
               color: mode === "request" ? "#a78bfa" : "#9ca3af",
               border: `1px solid ${mode === "request" ? "rgba(167,139,250,0.3)" : "rgba(255,255,255,0.08)"}`,
-            }}
-          >
+            }}>
             + Request
           </button>
-          {corrections.length > 0 && (
-            <button
-              onClick={() => setMode(mode === "approve" ? null : "approve")}
+          {pending.length > 0 && (
+            <button onClick={() => setMode(mode === "approve" ? null : "approve")}
               className="px-3 py-1.5 rounded-lg text-sm font-medium transition-all"
               style={{
                 background: mode === "approve" ? "rgba(251,191,36,0.2)" : "rgba(255,255,255,0.05)",
                 color: mode === "approve" ? "#fbbf24" : "#9ca3af",
                 border: `1px solid ${mode === "approve" ? "rgba(251,191,36,0.3)" : "rgba(255,255,255,0.08)"}`,
-              }}
-            >
-              ✓ Approve ({corrections.length})
+              }}>
+              ✓ Approve ({pending.length})
             </button>
           )}
         </div>
@@ -792,36 +825,25 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
         </div>
       )}
 
-      {/* Request form */}
       {mode === "request" && (
         <fetcher.Form method="post" className="space-y-4 mb-5 p-4 rounded-xl" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
           <input type="hidden" name="intent" value="request-correction" />
           <div className="text-sm font-semibold mb-3" style={{ color: "#a78bfa" }}>Request a Correction</div>
-
           <div>
             <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Your name</label>
-            <select
-              name="userId"
-              value={requestUserId}
-              onChange={(e) => setRequestUserId(e.target.value)}
+            <select name="userId" value={requestUserId} onChange={(e) => setRequestUserId(e.target.value)}
               className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-              style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white" }}
-            >
+              style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white" }}>
               <option value="">Select...</option>
               {Object.values(USERS).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
             </select>
           </div>
-
           {requestUserId && myClockIns.length > 0 && (
             <div>
               <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Clock-in to correct</label>
-              <select
-                name="clockInId"
-                value={selectedClockIn}
-                onChange={(e) => setSelectedClockIn(e.target.value)}
+              <select name="clockInId" value={selectedClockIn} onChange={(e) => setSelectedClockIn(e.target.value)}
                 className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-                style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white" }}
-              >
+                style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white" }}>
                 <option value="">Select clock-in...</option>
                 {myClockIns.map((c) => (
                   <option key={c.id} value={c.id}>
@@ -831,66 +853,44 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
               </select>
             </div>
           )}
-
           {requestUserId && myClockIns.length === 0 && (
             <div className="text-sm" style={{ color: "#6b7280" }}>No clock-ins found for this user.</div>
           )}
-
           <div>
             <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Corrected time</label>
-            <input
-              type="datetime-local"
-              name="requestedTimestamp"
-              value={requestedTime}
-              onChange={(e) => setRequestedTime(e.target.value)}
+            <input type="datetime-local" name="requestedTimestamp" value={requestedTime} onChange={(e) => setRequestedTime(e.target.value)}
               className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-              style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", colorScheme: "dark" }}
-            />
+              style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", colorScheme: "dark" }} />
           </div>
-
           <div>
             <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Reason</label>
-            <input
-              type="text"
-              name="reason"
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
+            <input type="text" name="reason" value={reason} onChange={(e) => setReason(e.target.value)}
               placeholder="Phone died, forgot to clock in, etc."
               className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-              style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white" }}
-            />
+              style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white" }} />
           </div>
-
           <div>
             <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Your password</label>
-            <input
-              type="password"
-              name="password"
-              value={requestPassword}
-              onChange={(e) => setRequestPassword(e.target.value)}
+            <input type="password" name="password" value={requestPassword} onChange={(e) => setRequestPassword(e.target.value)}
               className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-              style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", fontFamily: "JetBrains Mono, monospace" }}
-            />
+              style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", fontFamily: "JetBrains Mono, monospace" }} />
           </div>
-
-          <button
-            type="submit"
+          <button type="submit"
             disabled={!selectedClockIn || !requestedTime || !requestPassword || !requestUserId || fetcher.state === "submitting"}
             className="w-full py-2 rounded-lg text-sm font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-            style={{ background: "rgba(167,139,250,0.2)", color: "#a78bfa", border: "1px solid rgba(167,139,250,0.3)" }}
-          >
+            style={{ background: "rgba(167,139,250,0.2)", color: "#a78bfa", border: "1px solid rgba(167,139,250,0.3)" }}>
             {fetcher.state === "submitting" ? "Submitting..." : "Submit Request"}
           </button>
         </fetcher.Form>
       )}
 
-      {/* Pending corrections list */}
       {corrections.length > 0 ? (
         <div className="space-y-3">
           {corrections.map((c) => {
             const user = Object.values(USERS).find((u) => u.id === c.clockInUserId);
             const originalLateness = getLatenessMinutes(c.originalTimestamp);
             const requestedLateness = getLatenessMinutes(c.requestedTimestamp);
+            const approver = c.approvedBy ? USERS[c.approvedBy as keyof typeof USERS]?.name : null;
 
             return (
               <div key={c.id} className="p-4 rounded-xl" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
@@ -898,7 +898,7 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1">
                       <span style={{ color: user?.color }}>{user?.emoji} {user?.name}</span>
-                      <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(251,191,36,0.1)", color: "#fbbf24" }}>pending</span>
+                      <span className="text-xs px-2 py-0.5 rounded-full" style={statusStyle(c.status)}>{c.status}</span>
                     </div>
                     <div className="text-xs space-y-0.5" style={{ color: "#9ca3af" }}>
                       <div>
@@ -907,33 +907,29 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
                         <span style={{ color: latenessColor(requestedLateness) }}>{formatTime(c.requestedTimestamp)}</span>
                       </div>
                       {c.reason && <div className="italic">&ldquo;{c.reason}&rdquo;</div>}
-                      <div style={{ color: "#4b5563" }}>Requested by {USERS[c.requestedBy as keyof typeof USERS]?.name ?? c.requestedBy}</div>
+                      <div style={{ color: "#4b5563" }}>
+                        Requested by {USERS[c.requestedBy as keyof typeof USERS]?.name ?? c.requestedBy}
+                        {approver && ` · ${c.status === "approved" ? "approved" : "rejected"} by ${approver}`}
+                      </div>
                     </div>
                   </div>
                 </div>
 
-                {mode === "approve" && (
+                {mode === "approve" && c.status === "pending" && (
                   <div className="mt-3 pt-3 border-t" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
                     <div className="flex gap-2 mb-2">
-                      <select
-                        value={selectedCorrectionId === c.id ? approverId : ""}
+                      <select value={selectedCorrectionId === c.id ? approverId : ""}
                         onChange={(e) => { setApproverId(e.target.value); setSelectedCorrectionId(c.id); }}
                         className="flex-1 px-3 py-2 rounded-lg text-sm outline-none"
-                        style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white" }}
-                      >
+                        style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white" }}>
                         <option value="">Approver...</option>
-                        {Object.values(USERS)
-                          .filter((u) => u.id !== c.requestedBy)
-                          .map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                        {Object.values(USERS).filter((u) => u.id !== c.requestedBy).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
                       </select>
-                      <input
-                        type="password"
-                        placeholder="Password"
+                      <input type="password" placeholder="Password"
                         value={selectedCorrectionId === c.id ? approverPassword : ""}
                         onChange={(e) => { setApproverPassword(e.target.value); setSelectedCorrectionId(c.id); }}
                         className="flex-1 px-3 py-2 rounded-lg text-sm outline-none"
-                        style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", fontFamily: "JetBrains Mono" }}
-                      />
+                        style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", fontFamily: "JetBrains Mono" }} />
                     </div>
                     <div className="flex gap-2">
                       <fetcher.Form method="post" className="flex-1">
@@ -941,12 +937,10 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
                         <input type="hidden" name="correctionId" value={c.id} />
                         <input type="hidden" name="approverId" value={selectedCorrectionId === c.id ? approverId : ""} />
                         <input type="hidden" name="approverPassword" value={selectedCorrectionId === c.id ? approverPassword : ""} />
-                        <button
-                          type="submit"
+                        <button type="submit"
                           disabled={selectedCorrectionId !== c.id || !approverId || !approverPassword || fetcher.state === "submitting"}
                           className="w-full py-1.5 rounded-lg text-sm font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                          style={{ background: "rgba(52,211,153,0.15)", color: "#34d399", border: "1px solid rgba(52,211,153,0.3)" }}
-                        >
+                          style={{ background: "rgba(52,211,153,0.15)", color: "#34d399", border: "1px solid rgba(52,211,153,0.3)" }}>
                           ✓ Approve
                         </button>
                       </fetcher.Form>
@@ -955,12 +949,10 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
                         <input type="hidden" name="correctionId" value={c.id} />
                         <input type="hidden" name="approverId" value={selectedCorrectionId === c.id ? approverId : ""} />
                         <input type="hidden" name="approverPassword" value={selectedCorrectionId === c.id ? approverPassword : ""} />
-                        <button
-                          type="submit"
+                        <button type="submit"
                           disabled={selectedCorrectionId !== c.id || !approverId || !approverPassword || fetcher.state === "submitting"}
                           className="w-full py-1.5 rounded-lg text-sm font-medium transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                          style={{ background: "rgba(239,68,68,0.1)", color: "#ef4444", border: "1px solid rgba(239,68,68,0.2)" }}
-                        >
+                          style={{ background: "rgba(239,68,68,0.1)", color: "#ef4444", border: "1px solid rgba(239,68,68,0.2)" }}>
                           ✗ Reject
                         </button>
                       </fetcher.Form>
@@ -972,9 +964,7 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
           })}
         </div>
       ) : (
-        <div className="text-center py-6 text-sm" style={{ color: "#4b5563" }}>
-          No pending corrections
-        </div>
+        <div className="text-center py-6 text-sm" style={{ color: "#4b5563" }}>No corrections yet</div>
       )}
     </div>
   );
@@ -986,22 +976,23 @@ export default function Index() {
   const { stats, clockIns, corrections, today, usersWithoutPassword, devMode } = useLoaderData<typeof loader>();
   const [tab, setTab] = useState<"dashboard" | "clockin" | "corrections">("clockin");
 
-  const now = new Date();
-  const isClassTime = now.getHours() >= 9 && (now.getHours() < 11 || (now.getHours() === 11 && now.getMinutes() <= 50));
-  const classOver = now.getHours() > 11 || (now.getHours() === 11 && now.getMinutes() > 50);
+  // Use LA time for class-time indicator
+  const nowLA = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
+  const isClassTime = nowLA.getHours() >= 9 && (nowLA.getHours() < 11 || (nowLA.getHours() === 11 && nowLA.getMinutes() <= 50));
+  const classOver = nowLA.getHours() > 11 || (nowLA.getHours() === 11 && nowLA.getMinutes() > 50);
   const isLectureDay = LECTURE_SCHEDULE.some((l) => l.date === today) && !classOver;
   const currentWeek = getCurrentWeek(today);
   const nextLecture = getNextLecture(today);
+  const pendingCount = corrections.filter((c) => c.status === "pending").length;
 
   const tabs = [
     { id: "clockin", label: "Clock In", badge: null },
     { id: "dashboard", label: "Dashboard", badge: null },
-    { id: "corrections", label: "Corrections", badge: corrections.length > 0 ? corrections.length : null },
+    { id: "corrections", label: "Corrections", badge: pendingCount > 0 ? pendingCount : null },
   ] as const;
 
   return (
     <div className="min-h-screen" style={{ background: "#07070f" }}>
-      {/* Header */}
       <div className="border-b" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
         <div className="max-w-3xl mx-auto px-4 py-5">
           <div className="flex items-center justify-between">
@@ -1009,7 +1000,8 @@ export default function Index() {
               <div className="flex items-center gap-2">
                 <h1 className="text-2xl font-black tracking-tight gradient-text">CS 188 Tracker</h1>
                 {devMode && (
-                  <span className="px-2 py-0.5 rounded-full text-xs font-bold" style={{ background: "rgba(251,191,36,0.15)", color: "#fbbf24", border: "1px solid rgba(251,191,36,0.3)" }}>
+                  <span className="px-2 py-0.5 rounded-full text-xs font-bold"
+                    style={{ background: "rgba(251,191,36,0.15)", color: "#fbbf24", border: "1px solid rgba(251,191,36,0.3)" }}>
                     dev mode
                   </span>
                 )}
@@ -1023,7 +1015,7 @@ export default function Index() {
             </div>
             <div className="text-right">
               <div className="text-sm font-mono" style={{ color: "#6b7280" }}>
-                {now.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                {new Date(today + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
               </div>
               {isClassTime && (
                 <div className="flex items-center gap-1 justify-end mt-1">
@@ -1039,25 +1031,23 @@ export default function Index() {
         </div>
       </div>
 
-      {/* Tab bar */}
       <div className="border-b sticky top-0 z-10" style={{ borderColor: "rgba(255,255,255,0.06)", background: "rgba(7,7,15,0.95)", backdropFilter: "blur(12px)" }}>
         <div className="max-w-3xl mx-auto px-4">
           <div className="flex">
             {tabs.map(({ id, label, badge }) => (
-              <button
-                key={id}
-                onClick={() => setTab(id)}
+              <button key={id} onClick={() => setTab(id)}
                 className="px-5 py-3.5 text-sm font-medium transition-all relative"
-                style={{ color: tab === id ? "white" : "#6b7280" }}
-              >
+                style={{ color: tab === id ? "white" : "#6b7280" }}>
                 {label}
                 {badge && (
-                  <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-xs font-bold" style={{ background: "rgba(251,191,36,0.2)", color: "#fbbf24" }}>
+                  <span className="ml-1.5 px-1.5 py-0.5 rounded-full text-xs font-bold"
+                    style={{ background: "rgba(251,191,36,0.2)", color: "#fbbf24" }}>
                     {badge}
                   </span>
                 )}
                 {tab === id && (
-                  <div className="absolute bottom-0 left-0 right-0 h-0.5 rounded-full" style={{ background: "linear-gradient(90deg, #a78bfa, #60a5fa)" }} />
+                  <div className="absolute bottom-0 left-0 right-0 h-0.5 rounded-full"
+                    style={{ background: "linear-gradient(90deg, #a78bfa, #60a5fa)" }} />
                 )}
               </button>
             ))}
@@ -1065,23 +1055,27 @@ export default function Index() {
         </div>
       </div>
 
-      {/* Content */}
       <div className="max-w-3xl mx-auto px-4 py-6 space-y-5">
-        {tab === "clockin" && <ClockInSection today={today} usersWithoutPassword={usersWithoutPassword} isLectureDay={isLectureDay} nextLecture={nextLecture} devMode={devMode} />}
-
+        {tab === "clockin" && (
+          <ClockInSection
+            today={today}
+            usersWithoutPassword={usersWithoutPassword}
+            isLectureDay={isLectureDay}
+            nextLecture={nextLecture}
+            devMode={devMode}
+          />
+        )}
         {tab === "dashboard" && (
           <>
             <Leaderboard stats={stats} />
             <StatsCards stats={stats} />
           </>
         )}
-
         {tab === "corrections" && (
           <CorrectionsSection clockIns={clockIns} corrections={corrections} />
         )}
       </div>
 
-      {/* Footer */}
       <div className="text-center py-8 text-xs" style={{ color: "#1f2937" }}>
         built in 15 minutes for CS 188 · vibe coded
       </div>
