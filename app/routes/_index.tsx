@@ -154,6 +154,15 @@ export async function action({ request }: Route.ActionArgs) {
       return data({ error: "Wrong password. Try again." }, { status: 401 });
     }
 
+    if (lat !== null && lng !== null) {
+      const dx = lat - 34.073471;
+      const dy = lng - -118.440165;
+      const approxKm = Math.sqrt(dx * dx + dy * dy) * 111;
+      if (approxKm > 0.05) {
+        return data({ error: "You need to be at Perloff Hall to clock in." }, { status: 403 });
+      }
+    }
+
     const now = new Date();
     const date = now.toISOString().slice(0, 10);
 
@@ -319,6 +328,10 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
   const [showSuccess, setShowSuccess] = useState(false);
   const prevSubmitting = useRef(false);
 
+  const atLecture = locationStatus === "granted" && location
+    ? distanceKm(location.lat, location.lng, UCLA_LAT, UCLA_LNG) <= AT_LECTURE_RADIUS_KM
+    : null; // null = unknown (still requesting or denied)
+
   useEffect(() => {
     if (locationStatus === "idle") {
       setLocationStatus("requesting");
@@ -442,14 +455,11 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
 
         {/* Location status */}
         {(() => {
-          const atLecture = locationStatus === "granted" && location
-            ? distanceKm(location.lat, location.lng, UCLA_LAT, UCLA_LNG) <= AT_LECTURE_RADIUS_KM
-            : false;
           const dotColor = locationStatus === "requesting"
             ? "#fbbf24"
             : locationStatus === "denied"
             ? "#6b7280"
-            : atLecture
+            : atLecture === true
             ? "#34d399"
             : "#fbbf24";
 
@@ -461,12 +471,12 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
                   <div className="absolute inset-0 w-2 h-2 rounded-full animate-ping" style={{ background: dotColor }} />
                 )}
               </div>
-              {locationStatus === "granted" && atLecture && (
+              {locationStatus === "granted" && atLecture === true && (
                 <span className="px-2 py-0.5 rounded-full text-xs font-medium" style={{ background: "rgba(52,211,153,0.1)", color: "#34d399", border: "1px solid rgba(52,211,153,0.2)" }}>
                   at lecture
                 </span>
               )}
-              {locationStatus === "granted" && !atLecture && <span>not at lecture</span>}
+              {locationStatus === "granted" && atLecture === false && <span>not at lecture</span>}
               {locationStatus === "denied" && <span>location not shared</span>}
               {locationStatus === "requesting" && <span>Requesting location...</span>}
               {locationStatus === "idle" && <span>Location pending</span>}
@@ -476,11 +486,11 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
 
         <button
           type="submit"
-          disabled={!selectedUser || !password || fetcher.state === "submitting"}
+          disabled={!selectedUser || !password || fetcher.state === "submitting" || atLecture === false}
           className="btn-clockin w-full py-4 rounded-xl font-bold text-lg text-white transition-all duration-200 disabled:opacity-40 disabled:cursor-not-allowed disabled:transform-none relative overflow-hidden"
         >
           <span className="relative z-10">
-            {fetcher.state === "submitting" ? "Clocking in..." : "🕙 CLOCK IN"}
+            {fetcher.state === "submitting" ? "Clocking in..." : atLecture === false ? "Not at lecture" : "🕙 CLOCK IN"}
           </span>
         </button>
       </fetcher.Form>
