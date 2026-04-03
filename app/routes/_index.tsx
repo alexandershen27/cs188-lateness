@@ -57,7 +57,8 @@ interface SerialCorrection {
 
 // ── Loader ───────────────────────────────────────────────────────────────────
 
-export async function loader() {
+export async function loader({ request }: Route.LoaderArgs) {
+  const devMode = new URL(request.url).searchParams.get("dev") === "1";
   try {
     await connectDB();
   } catch (error) {
@@ -134,7 +135,7 @@ export async function loader() {
 
   const usersWithoutPassword = await getUsersWithoutPassword();
 
-  return { stats, clockIns: serialClockIns, corrections: serialCorrections, today, usersWithoutPassword };
+  return { stats, clockIns: serialClockIns, corrections: serialCorrections, today, usersWithoutPassword, devMode };
 }
 
 // ── Action ───────────────────────────────────────────────────────────────────
@@ -144,17 +145,21 @@ export async function action({ request }: Route.ActionArgs) {
   const fd = await request.formData();
   const intent = fd.get("intent") as string;
 
+  const devMode = fd.get("devMode") === "1";
+
   if (intent === "clockin") {
     const userId = fd.get("userId") as string;
     const password = fd.get("password") as string;
     const lat = fd.get("lat") ? parseFloat(fd.get("lat") as string) : null;
     const lng = fd.get("lng") ? parseFloat(fd.get("lng") as string) : null;
+    const bypassLocation = devMode && fd.get("bypassLocation") === "1";
+    const mockTimeRaw = devMode ? (fd.get("mockTime") as string | null) : null;
 
     if (!await validateUser(userId, password)) {
       return data({ error: "Wrong password. Try again." }, { status: 401 });
     }
 
-    if (lat !== null && lng !== null) {
+    if (!bypassLocation && lat !== null && lng !== null) {
       const dx = lat - 34.073471;
       const dy = lng - -118.440165;
       const approxKm = Math.sqrt(dx * dx + dy * dy) * 111;
@@ -163,8 +168,8 @@ export async function action({ request }: Route.ActionArgs) {
       }
     }
 
-    const now = new Date();
-    const date = now.toISOString().slice(0, 10);
+    const now = mockTimeRaw ? new Date(mockTimeRaw) : new Date();
+    const date = new Date(now).toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
 
     const existing = await ClockIn.findOne({ userId, date });
     if (existing) {
@@ -225,7 +230,7 @@ export async function action({ request }: Route.ActionArgs) {
     const approverPassword = fd.get("approverPassword") as string;
     const correctionId = fd.get("correctionId") as string;
 
-    if (!validateUser(approverId, approverPassword)) {
+    if (!await validateUser(approverId, approverPassword)) {
       return data({ error: "Wrong approver password." }, { status: 401 });
     }
 
@@ -251,7 +256,7 @@ export async function action({ request }: Route.ActionArgs) {
     const approverPassword = fd.get("approverPassword") as string;
     const correctionId = fd.get("correctionId") as string;
 
-    if (!validateUser(approverId, approverPassword)) {
+    if (!await validateUser(approverId, approverPassword)) {
       return data({ error: "Wrong password." }, { status: 401 });
     }
 
@@ -266,6 +271,13 @@ export async function action({ request }: Route.ActionArgs) {
     await correction.save();
 
     return data({ success: true, message: "Correction rejected." });
+  }
+
+  if (intent === "dev-delete-clockin" && devMode) {
+    const userId = fd.get("userId") as string;
+    const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
+    await ClockIn.deleteOne({ userId, date: today });
+    return data({ success: true, message: `Deleted clock-in for ${userId}` });
   }
 
   return data({ error: "Unknown intent." }, { status: 400 });
@@ -313,13 +325,15 @@ function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number): num
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture }: {
+function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture, devMode }: {
   today: string;
   usersWithoutPassword: string[];
   isLectureDay: boolean;
   nextLecture: { week: number; date: string } | null;
+  devMode: boolean;
 }) {
   const fetcher = useFetcher<typeof action>();
+  const deleteFetcher = useFetcher<typeof action>();
   const { revalidate } = useRevalidator();
   const [selectedUser, setSelectedUser] = useState<string>("");
   const [password, setPassword] = useState("");
@@ -327,10 +341,14 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
   const [locationStatus, setLocationStatus] = useState<"idle" | "requesting" | "granted" | "denied">("idle");
   const [showSuccess, setShowSuccess] = useState(false);
   const prevSubmitting = useRef(false);
+  const [bypassLocation, setBypassLocation] = useState(true);
+  const [mockTime, setMockTime] = useState("");
 
-  const atLecture = locationStatus === "granted" && location
+  const atLecture = devMode && bypassLocation
+    ? true
+    : locationStatus === "granted" && location
     ? distanceKm(location.lat, location.lng, UCLA_LAT, UCLA_LNG) <= AT_LECTURE_RADIUS_KM
-    : null; // null = unknown (still requesting or denied)
+    : null;
 
   useEffect(() => {
     if (locationStatus === "idle") {
@@ -402,7 +420,10 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
 
       <fetcher.Form method="post" className="space-y-5">
         <input type="hidden" name="intent" value="clockin" />
-        {location && (
+        {devMode && <input type="hidden" name="devMode" value="1" />}
+        {devMode && bypassLocation && <input type="hidden" name="bypassLocation" value="1" />}
+        {devMode && mockTime && <input type="hidden" name="mockTime" value={new Date(mockTime).toISOString()} />}
+        {!devMode && location && (
           <>
             <input type="hidden" name="lat" value={location.lat} />
             <input type="hidden" name="lng" value={location.lng} />
@@ -484,6 +505,31 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
           );
         })()}
 
+        {devMode && (
+          <div className="space-y-3 p-3 rounded-xl" style={{ background: "rgba(251,191,36,0.06)", border: "1px solid rgba(251,191,36,0.2)" }}>
+            <div className="text-xs font-semibold mb-2" style={{ color: "#fbbf24" }}>Dev overrides</div>
+            <label className="flex items-center gap-2 text-sm cursor-pointer" style={{ color: "#9ca3af" }}>
+              <input
+                type="checkbox"
+                checked={bypassLocation}
+                onChange={(e) => setBypassLocation(e.target.checked)}
+                className="accent-yellow-400"
+              />
+              Simulate being at Perloff Hall
+            </label>
+            <div>
+              <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Override clock-in time (leave blank for now)</label>
+              <input
+                type="datetime-local"
+                value={mockTime}
+                onChange={(e) => setMockTime(e.target.value)}
+                className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", colorScheme: "dark" }}
+              />
+            </div>
+          </div>
+        )}
+
         <button
           type="submit"
           disabled={!selectedUser || !password || fetcher.state === "submitting" || atLecture === false}
@@ -494,6 +540,29 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
           </span>
         </button>
       </fetcher.Form>
+
+      {devMode && (
+        <div className="mt-4 pt-4 border-t" style={{ borderColor: "rgba(251,191,36,0.15)" }}>
+          <div className="text-xs font-semibold mb-2" style={{ color: "#fbbf24" }}>Delete today's clock-in</div>
+          <div className="flex gap-2">
+            {Object.values(USERS).map((user) => (
+              <deleteFetcher.Form key={user.id} method="post" className="flex-1">
+                <input type="hidden" name="intent" value="dev-delete-clockin" />
+                <input type="hidden" name="devMode" value="1" />
+                <input type="hidden" name="userId" value={user.id} />
+                <button
+                  type="submit"
+                  onClick={() => setTimeout(revalidate, 100)}
+                  className="w-full py-1.5 rounded-lg text-xs font-medium transition-all"
+                  style={{ background: "rgba(239,68,68,0.1)", color: "#ef4444", border: "1px solid rgba(239,68,68,0.2)" }}
+                >
+                  {user.emoji} {user.name}
+                </button>
+              </deleteFetcher.Form>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -914,7 +983,7 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Index() {
-  const { stats, clockIns, corrections, today, usersWithoutPassword } = useLoaderData<typeof loader>();
+  const { stats, clockIns, corrections, today, usersWithoutPassword, devMode } = useLoaderData<typeof loader>();
   const [tab, setTab] = useState<"dashboard" | "clockin" | "corrections">("clockin");
 
   const now = new Date();
@@ -937,7 +1006,14 @@ export default function Index() {
         <div className="max-w-3xl mx-auto px-4 py-5">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-2xl font-black tracking-tight gradient-text">CS 188 Tracker</h1>
+              <div className="flex items-center gap-2">
+                <h1 className="text-2xl font-black tracking-tight gradient-text">CS 188 Tracker</h1>
+                {devMode && (
+                  <span className="px-2 py-0.5 rounded-full text-xs font-bold" style={{ background: "rgba(251,191,36,0.15)", color: "#fbbf24", border: "1px solid rgba(251,191,36,0.3)" }}>
+                    dev mode
+                  </span>
+                )}
+              </div>
               <p className="text-xs mt-0.5" style={{ color: "#4b5563" }}>
                 Human-AI Interaction · Week {currentWeek} of 10
                 {nextLecture && !isLectureDay && (
@@ -991,7 +1067,7 @@ export default function Index() {
 
       {/* Content */}
       <div className="max-w-3xl mx-auto px-4 py-6 space-y-5">
-        {tab === "clockin" && <ClockInSection today={today} usersWithoutPassword={usersWithoutPassword} isLectureDay={isLectureDay} nextLecture={nextLecture} />}
+        {tab === "clockin" && <ClockInSection today={today} usersWithoutPassword={usersWithoutPassword} isLectureDay={isLectureDay} nextLecture={nextLecture} devMode={devMode} />}
 
         {tab === "dashboard" && (
           <>
