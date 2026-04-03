@@ -329,8 +329,10 @@ export async function action({ request }: Route.ActionArgs) {
       return data({ error: "Invalid lecture date." }, { status: 400 });
     }
 
-    const todayLA = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
-    if (date >= todayLA) {
+    const realTodayLA = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
+    const mockDateParam = devMode ? (fd.get("mockDate") as string | null) : null;
+    const effectiveToday = mockDateParam ?? realTodayLA;
+    if (date >= effectiveToday) {
       return data({ error: "Can only add missed clock-ins for past lectures." }, { status: 400 });
     }
 
@@ -467,13 +469,13 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
     : "#fbbf24";
 
   const nextLectureLabel = nextLecture
-    ? new Date(nextLecture.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })
+    ? "Next lecture: " + new Date(nextLecture.date + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric" })
     : null;
 
   const buttonDisabled = !selectedUser || !password || fetcher.state === "submitting" || atLecture === false || classEnded || tooEarly;
   const buttonLabel = fetcher.state === "submitting" ? "Clocking in..."
     : tooEarly ? "Opens at 9:40 AM"
-    : classEnded ? (nextLectureLabel ? `Next: ${nextLectureLabel}` : "Class ended")
+    : classEnded ? (nextLectureLabel ?? "Class ended")
     : atLecture === false ? "🚫 Not in Perloff"
     : "🕙 CLOCK IN";
 
@@ -780,7 +782,7 @@ function StatsCards({ stats }: { stats: UserStats[] }) {
   );
 }
 
-function CorrectionsSection({ clockIns, corrections, today }: { clockIns: SerialClockIn[]; corrections: SerialCorrection[]; today: string }) {
+function CorrectionsSection({ clockIns, corrections, today, devMode }: { clockIns: SerialClockIn[]; corrections: SerialCorrection[]; today: string; devMode: boolean }) {
   const fetcher = useFetcher<typeof action>();
   const { revalidate } = useRevalidator();
   const [mode, setMode] = useState<"request" | "approve" | "add-missed" | null>(null);
@@ -944,6 +946,8 @@ function CorrectionsSection({ clockIns, corrections, today }: { clockIns: Serial
       {mode === "add-missed" && (
         <fetcher.Form method="post" className="space-y-4 mb-5 p-4 rounded-xl" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
           <input type="hidden" name="intent" value="add-missed-clockin" />
+          {devMode && <input type="hidden" name="devMode" value="1" />}
+          {devMode && <input type="hidden" name="mockDate" value={today} />}
           <div className="text-sm font-semibold mb-3" style={{ color: "#34d399" }}>Add Missed Clock-In</div>
           <div>
             <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Who attended?</label>
@@ -1129,7 +1133,7 @@ export default function Index() {
               <p className="text-xs mt-0.5" style={{ color: "#4b5563" }}>
                 Human-AI Interaction · Week {currentWeek} of 10
                 {nextLecture && !isLectureDay && (
-                  <span> · Next: {new Date(nextLecture.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</span>
+                  <span> · Next lecture: {new Date(nextLecture.date + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric" })}</span>
                 )}
               </p>
             </div>
@@ -1194,7 +1198,7 @@ export default function Index() {
           </>
         )}
         {tab === "corrections" && (
-          <CorrectionsSection clockIns={clockIns} corrections={corrections} today={today} />
+          <CorrectionsSection clockIns={clockIns} corrections={corrections} today={today} devMode={devMode} />
         )}
       </div>
 
