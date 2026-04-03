@@ -164,7 +164,7 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   const usersWithoutPassword = await getUsersWithoutPassword();
 
-  return { stats, clockIns: serialClockIns, corrections: serialCorrections, today, usersWithoutPassword, devMode };
+  return { stats, clockIns: serialClockIns, corrections: serialCorrections, today, classIsOver, usersWithoutPassword, devMode };
 }
 
 // ── Action ───────────────────────────────────────────────────────────────────
@@ -187,7 +187,10 @@ export async function action({ request }: Route.ActionArgs) {
       return data({ error: "Wrong password. Try again." }, { status: 401 });
     }
 
-    if (!bypassLocation && lat !== null && lng !== null) {
+    if (!bypassLocation) {
+      if (lat === null || lng === null) {
+        return data({ error: "Location is required to clock in." }, { status: 403 });
+      }
       const dx = lat - 34.073471;
       const dy = lng - -118.440165;
       const approxKm = Math.sqrt(dx * dx + dy * dy) * 111;
@@ -332,8 +335,10 @@ export async function action({ request }: Route.ActionArgs) {
     const realTodayLA = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
     const mockDateParam = devMode ? (fd.get("mockDate") as string | null) : null;
     const effectiveToday = mockDateParam ?? realTodayLA;
-    if (date >= effectiveToday) {
-      return data({ error: "Can only add missed clock-ins for past lectures." }, { status: 400 });
+    // Allow today only if class has ended — client passes classIsOver from loader
+    const classIsOverParam = fd.get("classIsOver") === "1";
+    if (date > effectiveToday || (date === effectiveToday && !classIsOverParam)) {
+      return data({ error: "Can only add missed clock-ins after class ends." }, { status: 400 });
     }
 
     const existing = await ClockIn.findOne({ userId, date });
@@ -438,9 +443,11 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
 
   const atLecture = devMode && bypassLocation
     ? true
+    : locationStatus === "denied"
+    ? false
     : locationStatus === "granted" && location
     ? distanceKm(location.lat, location.lng, PERLOFF_LAT, PERLOFF_LNG) <= AT_LECTURE_RADIUS_KM
-    : null;
+    : null; // still requesting
 
   // Compute time-window state using mockTime if set, else real LA time
   const effectiveTimeLA = mockTime
@@ -471,6 +478,7 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
   const buttonLabel = fetcher.state === "submitting" ? "Clocking in..."
     : tooEarly ? "Opens at 9:40 AM"
     : classEnded ? (nextLectureLabel ?? "Class ended")
+    : locationStatus === "denied" ? "📍 Enable location"
     : atLecture === false ? "🚫 Not in Perloff"
     : "🕙 CLOCK IN";
 
@@ -517,7 +525,7 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
         {devMode && <input type="hidden" name="devMode" value="1" />}
         {devMode && bypassLocation && <input type="hidden" name="bypassLocation" value="1" />}
         {devMode && mockTime && <input type="hidden" name="mockTime" value={new Date(mockTime).toISOString()} />}
-        {!devMode && location && (
+        {location && (
           <>
             <input type="hidden" name="lat" value={location.lat} />
             <input type="hidden" name="lng" value={location.lng} />
@@ -777,7 +785,7 @@ function StatsCards({ stats }: { stats: UserStats[] }) {
   );
 }
 
-function CorrectionsSection({ clockIns, corrections, today, devMode }: { clockIns: SerialClockIn[]; corrections: SerialCorrection[]; today: string; devMode: boolean }) {
+function CorrectionsSection({ clockIns, corrections, today, classIsOver, devMode }: { clockIns: SerialClockIn[]; corrections: SerialCorrection[]; today: string; classIsOver: boolean; devMode: boolean }) {
   const fetcher = useFetcher<typeof action>();
   const { revalidate } = useRevalidator();
   const [mode, setMode] = useState<"request" | "approve" | "add-missed" | null>(null);
@@ -820,7 +828,9 @@ function CorrectionsSection({ clockIns, corrections, today, devMode }: { clockIn
     if (!userId) return [];
     const userDates = new Set(clockIns.filter((c) => c.userId === userId).map((c) => c.date));
     return LECTURE_SCHEDULE.filter(
-      (l) => l.date >= FIRST_TRACKED_LECTURE && l.date < today && !userDates.has(l.date)
+      (l) => l.date >= FIRST_TRACKED_LECTURE &&
+        (l.date < today || (l.date === today && classIsOver)) &&
+        !userDates.has(l.date)
     );
   };
 
@@ -943,6 +953,7 @@ function CorrectionsSection({ clockIns, corrections, today, devMode }: { clockIn
           <input type="hidden" name="intent" value="add-missed-clockin" />
           {devMode && <input type="hidden" name="devMode" value="1" />}
           {devMode && <input type="hidden" name="mockDate" value={today} />}
+          <input type="hidden" name="classIsOver" value={classIsOver ? "1" : "0"} />
           <div className="text-sm font-semibold mb-3" style={{ color: "#34d399" }}>Add Missed Clock-In</div>
           <div>
             <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Who attended?</label>
@@ -1091,7 +1102,7 @@ function CorrectionsSection({ clockIns, corrections, today, devMode }: { clockIn
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Index() {
-  const { stats, clockIns, corrections, today, usersWithoutPassword, devMode } = useLoaderData<typeof loader>();
+  const { stats, clockIns, corrections, today, classIsOver, usersWithoutPassword, devMode } = useLoaderData<typeof loader>();
   const [tab, setTab] = useState<"dashboard" | "clockin" | "corrections">("clockin");
   const [mockTime, setMockTime] = useState("");
 
@@ -1196,7 +1207,7 @@ export default function Index() {
           </>
         )}
         {tab === "corrections" && (
-          <CorrectionsSection clockIns={clockIns} corrections={corrections} today={today} devMode={devMode} />
+          <CorrectionsSection clockIns={clockIns} corrections={corrections} today={today} classIsOver={classIsOver} devMode={devMode} />
         )}
       </div>
 
