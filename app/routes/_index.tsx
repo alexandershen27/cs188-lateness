@@ -187,10 +187,14 @@ export async function action({ request }: Route.ActionArgs) {
 
     const now = mockTimeRaw ? new Date(mockTimeRaw) : new Date();
 
-    // Block clock-in if class is over (past 11:50 AM PT)
+    // Block clock-in outside the window: 9:40 AM – 11:50 AM PT
     const nowLA = new Date(now.toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
-    if (nowLA.getHours() > 11 || (nowLA.getHours() === 11 && nowLA.getMinutes() >= 50)) {
-      return data({ error: "Class has ended. Clock-in is only open 10:00–11:50 AM." }, { status: 400 });
+    const minutesSinceMidnight = nowLA.getHours() * 60 + nowLA.getMinutes();
+    if (minutesSinceMidnight < 9 * 60 + 40) {
+      return data({ error: "Clock-in opens at 9:40 AM." }, { status: 400 });
+    }
+    if (minutesSinceMidnight >= 11 * 60 + 50) {
+      return data({ error: "Class has ended." }, { status: 400 });
     }
 
     const date = now.toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
@@ -342,23 +346,15 @@ function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number): num
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function LocationPill({ present }: { present: boolean }) {
-  const color = present ? "#34d399" : "#fbbf24";
-  const bg = present ? "rgba(52,211,153,0.1)" : "rgba(251,191,36,0.1)";
-  const border = present ? "rgba(52,211,153,0.25)" : "rgba(251,191,36,0.25)";
-  return (
-    <span className="px-2 py-0.5 rounded-full text-xs font-medium" style={{ color, background: bg, border: `1px solid ${border}` }}>
-      {present ? "in Perloff" : "not in Perloff"}
-    </span>
-  );
-}
 
-function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture, devMode }: {
+function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture, devMode, mockTime, setMockTime }: {
   today: string;
   usersWithoutPassword: string[];
   isLectureDay: boolean;
   nextLecture: { week: number; date: string } | null;
   devMode: boolean;
+  mockTime: string;
+  setMockTime: (v: string) => void;
 }) {
   const fetcher = useFetcher<typeof action>();
   const deleteFetcher = useFetcher<typeof action>();
@@ -371,7 +367,6 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
   const [location, setLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [locationStatus, setLocationStatus] = useState<"idle" | "requesting" | "granted" | "denied">("idle");
   const [bypassLocation, setBypassLocation] = useState(true);
-  const [mockTime, setMockTime] = useState("");
 
   const prevSubmitting = useRef(false);
 
@@ -402,11 +397,13 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
     ? distanceKm(location.lat, location.lng, PERLOFF_LAT, PERLOFF_LNG) <= AT_LECTURE_RADIUS_KM
     : null;
 
-  // Compute class-over using mockTime if set, else real LA time
+  // Compute time-window state using mockTime if set, else real LA time
   const effectiveTimeLA = mockTime
     ? new Date(new Date(mockTime).toLocaleString("en-US", { timeZone: "America/Los_Angeles" }))
     : new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
-  const classEnded = effectiveTimeLA.getHours() > 11 || (effectiveTimeLA.getHours() === 11 && effectiveTimeLA.getMinutes() >= 50);
+  const minutesSinceMidnight = effectiveTimeLA.getHours() * 60 + effectiveTimeLA.getMinutes();
+  const tooEarly = minutesSinceMidnight < 9 * 60 + 40;
+  const classEnded = minutesSinceMidnight >= 11 * 60 + 50;
 
   const responseData = fetcher.data as Record<string, unknown> | undefined;
   const error = responseData?.error as string | undefined;
@@ -426,10 +423,15 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
     : atLecture === true ? "#34d399"
     : "#fbbf24";
 
-  const buttonDisabled = !selectedUser || !password || fetcher.state === "submitting" || atLecture === false || classEnded;
+  const nextLectureLabel = nextLecture
+    ? new Date(nextLecture.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })
+    : null;
+
+  const buttonDisabled = !selectedUser || !password || fetcher.state === "submitting" || atLecture === false || classEnded || tooEarly;
   const buttonLabel = fetcher.state === "submitting" ? "Clocking in..."
-    : classEnded ? "Class ended"
-    : atLecture === false ? "Not in Perloff"
+    : tooEarly ? "Opens at 9:40 AM"
+    : classEnded ? (nextLectureLabel ? `Next: ${nextLectureLabel}` : "Class ended")
+    : atLecture === false ? "🚫 Not in Perloff"
     : "🕙 CLOCK IN";
 
   // Sync mockTime date to URL so the whole page updates
@@ -450,7 +452,6 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
         <div className="mb-4 p-4 rounded-xl text-center" style={{ background: "rgba(52,211,153,0.12)", border: "1px solid rgba(52,211,153,0.3)" }}>
           <div className="text-2xl mb-1">{quip?.split(" ")[0]}</div>
           <div className="font-bold text-lg" style={{ color: "#34d399" }}>{latenessStr}</div>
-          <div className="text-sm mt-1" style={{ color: "#9ca3af" }}>{quip?.slice(quip.indexOf(" ") + 1)}</div>
         </div>
       )}
 
@@ -516,20 +517,6 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
             className="w-full px-4 py-3 rounded-xl outline-none transition-all duration-200"
             style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", fontFamily: "JetBrains Mono, monospace" }}
           />
-        </div>
-
-        {/* Location status */}
-        <div className="flex items-center gap-2 text-sm" style={{ color: "#6b7280" }}>
-          <div className="relative w-2 h-2 flex-shrink-0">
-            <div className="w-2 h-2 rounded-full" style={{ background: dotColor }} />
-            {locationStatus === "requesting" && (
-              <div className="absolute inset-0 w-2 h-2 rounded-full animate-ping" style={{ background: dotColor }} />
-            )}
-          </div>
-          {locationStatus === "granted" && atLecture !== null && <LocationPill present={atLecture} />}
-          {locationStatus === "denied" && <span>location not shared</span>}
-          {locationStatus === "requesting" && <span>Requesting location...</span>}
-          {locationStatus === "idle" && <span>Location pending</span>}
         </div>
 
         {/* Dev overrides */}
@@ -975,6 +962,7 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
 export default function Index() {
   const { stats, clockIns, corrections, today, usersWithoutPassword, devMode } = useLoaderData<typeof loader>();
   const [tab, setTab] = useState<"dashboard" | "clockin" | "corrections">("clockin");
+  const [mockTime, setMockTime] = useState("");
 
   // Use LA time for class-time indicator
   const nowLA = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
@@ -1063,6 +1051,8 @@ export default function Index() {
             isLectureDay={isLectureDay}
             nextLecture={nextLecture}
             devMode={devMode}
+            mockTime={mockTime}
+            setMockTime={setMockTime}
           />
         )}
         {tab === "dashboard" && (
