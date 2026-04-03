@@ -889,7 +889,7 @@ function CorrectionsSection({ clockIns, corrections, today, classIsOver, devMode
       )}
 
       {mode === "request" && (
-        <fetcher.Form method="post" className="space-y-4 mb-5 p-4 rounded-xl" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+        <fetcher.Form method="post" className="space-y-4 mb-5 p-4 rounded-xl" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }} onSubmit={() => setMode(null)}>
           <input type="hidden" name="intent" value="request-correction" />
           <div className="text-sm font-semibold mb-3" style={{ color: "#a78bfa" }}>Request a Correction</div>
           <div>
@@ -949,7 +949,7 @@ function CorrectionsSection({ clockIns, corrections, today, classIsOver, devMode
       )}
 
       {mode === "add-missed" && (
-        <fetcher.Form method="post" className="space-y-4 mb-5 p-4 rounded-xl" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+        <fetcher.Form method="post" className="space-y-4 mb-5 p-4 rounded-xl" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }} onSubmit={() => setMode(null)}>
           <input type="hidden" name="intent" value="add-missed-clockin" />
           {devMode && <input type="hidden" name="devMode" value="1" />}
           {devMode && <input type="hidden" name="mockDate" value={today} />}
