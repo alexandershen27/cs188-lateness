@@ -67,6 +67,7 @@ export async function loader({ request }: Route.LoaderArgs) {
   const params = new URL(request.url).searchParams;
   const devMode = params.get("dev") === "1";
   const mockDate = devMode ? params.get("mockDate") : null;
+  const mockTimeParam = devMode ? params.get("mockTime") : null; // HH:MM
 
   try {
     await connectDB();
@@ -76,11 +77,18 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   const today = mockDate ?? new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
 
-  // Determine if class is over — if today is a mocked past date, it's always over
+  // Determine if class is over
   const realTodayLA = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
   const nowLA = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
-  const classIsOver = realTodayLA > today ||
-    (realTodayLA === today && (nowLA.getHours() > 11 || (nowLA.getHours() === 11 && nowLA.getMinutes() >= 50)));
+  let classIsOver: boolean;
+  if (mockDate && mockTimeParam) {
+    // Dev mode: use the mocked time to decide if class is over on that date
+    const [mockH, mockM] = mockTimeParam.split(":").map(Number);
+    classIsOver = realTodayLA > today || (mockH * 60 + mockM) >= 11 * 60 + 50;
+  } else {
+    classIsOver = realTodayLA > today ||
+      (realTodayLA === today && (nowLA.getHours() > 11 || (nowLA.getHours() === 11 && nowLA.getMinutes() >= 50)));
+  }
 
   const completedLectures = getCompletedOfficialLectures(today, classIsOver);
 
@@ -471,8 +479,12 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
 
   // Sync mockTime date to URL so the whole page updates
   const mockDateForURL = mockTime ? mockTime.slice(0, 10) : null;
+  const mockTimeForURL = mockTime ? mockTime.slice(11, 16) : null; // HH:MM
   const applyMockDate = () => {
-    if (mockDateForURL) navigate(`?dev=1&mockDate=${mockDateForURL}`, { replace: true });
+    if (mockDateForURL) {
+      const timeParam = mockTimeForURL ? `&mockTime=${mockTimeForURL}` : "";
+      navigate(`?dev=1&mockDate=${mockDateForURL}${timeParam}`, { replace: true });
+    }
   };
 
   return (
