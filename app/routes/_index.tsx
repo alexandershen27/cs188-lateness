@@ -14,6 +14,7 @@ import {
   LECTURE_SCHEDULE,
   getCompletedOfficialLectures,
   ABSENCE_PENALTY_MINUTES,
+  FIRST_TRACKED_LECTURE,
 } from "~/lib/config";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -75,9 +76,11 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   const today = mockDate ?? new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
 
-  // Determine if class is over for today (needed for absence tracking)
+  // Determine if class is over — if today is a mocked past date, it's always over
+  const realTodayLA = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
   const nowLA = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
-  const classIsOver = nowLA.getHours() > 11 || (nowLA.getHours() === 11 && nowLA.getMinutes() >= 50);
+  const classIsOver = realTodayLA > today ||
+    (realTodayLA === today && (nowLA.getHours() > 11 || (nowLA.getHours() === 11 && nowLA.getMinutes() >= 50)));
 
   const completedLectures = getCompletedOfficialLectures(today, classIsOver);
 
@@ -301,6 +304,38 @@ export async function action({ request }: Route.ActionArgs) {
     return data({ success: true });
   }
 
+  if (intent === "add-missed-clockin") {
+    const userId = fd.get("userId") as string;
+    const password = fd.get("password") as string;
+    const date = fd.get("date") as string;
+    const arrivalTimeISO = fd.get("arrivalTimeISO") as string;
+
+    if (!await validateUser(userId, password)) {
+      return data({ error: "Wrong password." }, { status: 401 });
+    }
+
+    const isValidLecture = LECTURE_SCHEDULE.some(
+      (l) => l.date === date && l.date >= FIRST_TRACKED_LECTURE
+    );
+    if (!isValidLecture) {
+      return data({ error: "Invalid lecture date." }, { status: 400 });
+    }
+
+    const todayLA = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
+    if (date >= todayLA) {
+      return data({ error: "Can only add missed clock-ins for past lectures." }, { status: 400 });
+    }
+
+    const existing = await ClockIn.findOne({ userId, date });
+    if (existing) {
+      return data({ error: "Already have a clock-in for this lecture." }, { status: 409 });
+    }
+
+    const arrivalTime = new Date(arrivalTimeISO);
+    await ClockIn.create({ userId, timestamp: arrivalTime, date });
+    return data({ success: true, message: "Clock-in added!" });
+  }
+
   return data({ error: "Unknown intent." }, { status: 400 });
 }
 
@@ -415,7 +450,7 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
   const headerRight = isLectureDay
     ? new Date(today + "T12:00:00").toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }) + " · 10:00 AM"
     : nextLecture
-    ? "Next: " + new Date(nextLecture.date + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })
+    ? "Next lecture: " + new Date(nextLecture.date + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric" })
     : "No upcoming lectures";
 
   const dotColor = locationStatus === "requesting" ? "#fbbf24"
@@ -733,10 +768,10 @@ function StatsCards({ stats }: { stats: UserStats[] }) {
   );
 }
 
-function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn[]; corrections: SerialCorrection[] }) {
+function CorrectionsSection({ clockIns, corrections, today }: { clockIns: SerialClockIn[]; corrections: SerialCorrection[]; today: string }) {
   const fetcher = useFetcher<typeof action>();
   const { revalidate } = useRevalidator();
-  const [mode, setMode] = useState<"request" | "approve" | null>(null);
+  const [mode, setMode] = useState<"request" | "approve" | "add-missed" | null>(null);
   const [selectedClockIn, setSelectedClockIn] = useState("");
   const [requestedTime, setRequestedTime] = useState("");
   const [reason, setReason] = useState("");
@@ -745,6 +780,10 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
   const [approverId, setApproverId] = useState("");
   const [approverPassword, setApproverPassword] = useState("");
   const [selectedCorrectionId, setSelectedCorrectionId] = useState("");
+  const [addUserId, setAddUserId] = useState("");
+  const [addDate, setAddDate] = useState("");
+  const [addTime, setAddTime] = useState("10:00");
+  const [addPassword, setAddPassword] = useState("");
   const prevSubmitting = useRef(false);
 
   useEffect(() => {
@@ -756,6 +795,7 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
       setSelectedClockIn(""); setRequestedTime(""); setReason("");
       setRequestUserId(""); setRequestPassword("");
       setApproverId(""); setApproverPassword(""); setSelectedCorrectionId("");
+      setAddUserId(""); setAddDate(""); setAddTime("10:00"); setAddPassword("");
     }
     prevSubmitting.current = fetcher.state === "submitting";
   }, [fetcher.state, fetcher.data]);
@@ -766,6 +806,14 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
 
   const myClockIns = clockIns.filter((c) => c.userId === requestUserId);
   const pending = corrections.filter((c) => c.status === "pending");
+
+  const missedLectures = (userId: string) => {
+    if (!userId) return [];
+    const userDates = new Set(clockIns.filter((c) => c.userId === userId).map((c) => c.date));
+    return LECTURE_SCHEDULE.filter(
+      (l) => l.date >= FIRST_TRACKED_LECTURE && l.date < today && !userDates.has(l.date)
+    );
+  };
 
   const statusStyle = (status: string) => {
     if (status === "approved") return { background: "rgba(52,211,153,0.1)", color: "#34d399" };
@@ -778,6 +826,15 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
       <div className="flex items-center justify-between mb-5">
         <h2 className="text-xl font-bold">Corrections</h2>
         <div className="flex gap-2">
+          <button onClick={() => setMode(mode === "add-missed" ? null : "add-missed")}
+            className="px-3 py-1.5 rounded-lg text-sm font-medium transition-all"
+            style={{
+              background: mode === "add-missed" ? "rgba(52,211,153,0.2)" : "rgba(255,255,255,0.05)",
+              color: mode === "add-missed" ? "#34d399" : "#9ca3af",
+              border: `1px solid ${mode === "add-missed" ? "rgba(52,211,153,0.3)" : "rgba(255,255,255,0.08)"}`,
+            }}>
+            + Add
+          </button>
           <button onClick={() => setMode(mode === "request" ? null : "request")}
             className="px-3 py-1.5 rounded-lg text-sm font-medium transition-all"
             style={{
@@ -785,7 +842,7 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
               color: mode === "request" ? "#a78bfa" : "#9ca3af",
               border: `1px solid ${mode === "request" ? "rgba(167,139,250,0.3)" : "rgba(255,255,255,0.08)"}`,
             }}>
-            + Request
+            ± Request
           </button>
           {pending.length > 0 && (
             <button onClick={() => setMode(mode === "approve" ? null : "approve")}
@@ -845,9 +902,10 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
           )}
           <div>
             <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Corrected time</label>
-            <input type="datetime-local" name="requestedTimestamp" value={requestedTime} onChange={(e) => setRequestedTime(e.target.value)}
+            <input type="datetime-local" value={requestedTime} onChange={(e) => setRequestedTime(e.target.value)}
               className="w-full px-3 py-2 rounded-lg text-sm outline-none"
               style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", colorScheme: "dark" }} />
+            <input type="hidden" name="requestedTimestamp" value={requestedTime ? new Date(requestedTime).toISOString() : ""} />
           </div>
           <div>
             <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Reason</label>
@@ -867,6 +925,68 @@ function CorrectionsSection({ clockIns, corrections }: { clockIns: SerialClockIn
             className="w-full py-2 rounded-lg text-sm font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed"
             style={{ background: "rgba(167,139,250,0.2)", color: "#a78bfa", border: "1px solid rgba(167,139,250,0.3)" }}>
             {fetcher.state === "submitting" ? "Submitting..." : "Submit Request"}
+          </button>
+        </fetcher.Form>
+      )}
+
+      {mode === "add-missed" && (
+        <fetcher.Form method="post" className="space-y-4 mb-5 p-4 rounded-xl" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+          <input type="hidden" name="intent" value="add-missed-clockin" />
+          <div className="text-sm font-semibold mb-3" style={{ color: "#34d399" }}>Add Missed Clock-In</div>
+          <div>
+            <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Who attended?</label>
+            <select value={addUserId} onChange={(e) => { setAddUserId(e.target.value); setAddDate(""); }}
+              name="userId"
+              className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white" }}>
+              <option value="">Select...</option>
+              {Object.values(USERS).map((u) => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+          </div>
+          {addUserId && (
+            missedLectures(addUserId).length > 0 ? (
+              <div>
+                <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Lecture date</label>
+                <select value={addDate} onChange={(e) => setAddDate(e.target.value)}
+                  name="date"
+                  className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                  style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white" }}>
+                  <option value="">Select lecture...</option>
+                  {missedLectures(addUserId).map((l) => (
+                    <option key={l.date} value={l.date}>
+                      {new Date(l.date + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric" })} (Week {l.week})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div className="text-sm" style={{ color: "#6b7280" }}>No missed lectures to add.</div>
+            )
+          )}
+          {addDate && (
+            <div>
+              <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Arrival time</label>
+              <input
+                type="time"
+                value={addTime}
+                onChange={(e) => setAddTime(e.target.value)}
+                className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", colorScheme: "dark" }}
+              />
+              <input type="hidden" name="arrivalTimeISO" value={addDate && addTime ? new Date(`${addDate}T${addTime}`).toISOString() : ""} />
+            </div>
+          )}
+          <div>
+            <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Your password</label>
+            <input type="password" name="password" value={addPassword} onChange={(e) => setAddPassword(e.target.value)}
+              className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", fontFamily: "JetBrains Mono, monospace" }} />
+          </div>
+          <button type="submit"
+            disabled={!addUserId || !addDate || !addTime || !addPassword || fetcher.state === "submitting"}
+            className="w-full py-2 rounded-lg text-sm font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+            style={{ background: "rgba(52,211,153,0.15)", color: "#34d399", border: "1px solid rgba(52,211,153,0.3)" }}>
+            {fetcher.state === "submitting" ? "Adding..." : "Add Clock-In"}
           </button>
         </fetcher.Form>
       )}
@@ -1062,7 +1182,7 @@ export default function Index() {
           </>
         )}
         {tab === "corrections" && (
-          <CorrectionsSection clockIns={clockIns} corrections={corrections} />
+          <CorrectionsSection clockIns={clockIns} corrections={corrections} today={today} />
         )}
       </div>
 
