@@ -463,11 +463,6 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
     ? "Next lecture: " + new Date(nextLecture.date + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric" })
     : "No upcoming lectures";
 
-  const dotColor = locationStatus === "requesting" ? "#fbbf24"
-    : locationStatus === "denied" ? "#6b7280"
-    : atLecture === true ? "#34d399"
-    : "#fbbf24";
-
   const nextLectureLabel = nextLecture
     ? "Next lecture: " + new Date(nextLecture.date + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric" })
     : null;
@@ -1100,10 +1095,13 @@ export default function Index() {
   const [tab, setTab] = useState<"dashboard" | "clockin" | "corrections">("clockin");
   const [mockTime, setMockTime] = useState("");
 
-  // Use LA time for class-time indicator
+  // Use mock time if set, else real LA time
   const nowLA = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Los_Angeles" }));
-  const isClassTime = nowLA.getHours() >= 9 && (nowLA.getHours() < 11 || (nowLA.getHours() === 11 && nowLA.getMinutes() <= 50));
-  const classOver = nowLA.getHours() > 11 || (nowLA.getHours() === 11 && nowLA.getMinutes() > 50);
+  const effectiveLA = mockTime
+    ? new Date(new Date(mockTime).toLocaleString("en-US", { timeZone: "America/Los_Angeles" }))
+    : nowLA;
+  const isClassTime = effectiveLA.getHours() >= 9 && (effectiveLA.getHours() < 11 || (effectiveLA.getHours() === 11 && effectiveLA.getMinutes() < 50));
+  const classOver = effectiveLA.getHours() > 11 || (effectiveLA.getHours() === 11 && effectiveLA.getMinutes() >= 50);
   const isLectureDay = LECTURE_SCHEDULE.some((l) => l.date === today) && !classOver;
   const currentWeek = getCurrentWeek(today);
   const nextLecture = getNextLecture(today);
