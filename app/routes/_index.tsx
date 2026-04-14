@@ -538,7 +538,7 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
         {/* User selection */}
         <div>
           <label className="block text-sm font-medium mb-2" style={{ color: "#9ca3af" }}>Who are you?</label>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-4 gap-3">
             {Object.values(USERS).map((user) => (
               <button
                 key={user.id}
@@ -706,7 +706,7 @@ function Leaderboard({ stats }: { stats: UserStats[] }) {
 
 function StatsCards({ stats }: { stats: UserStats[] }) {
   return (
-    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
       {stats.map((user, i) => (
         <div key={user.userId} className="glass rounded-2xl p-5 animate-slide-up"
           style={{ animationDelay: `${i * 0.08}s`, borderColor: user.color + "33" }}>
