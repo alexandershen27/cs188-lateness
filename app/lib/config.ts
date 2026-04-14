@@ -1,10 +1,11 @@
 // Shared between server and client — no passwords here
 
-export const USERS = {
-  keshiv: { id: "keshiv", name: "Keshiv", color: "#a78bfa", glow: "rgba(167,139,250,0.4)", emoji: "🦅" },
-  alex:   { id: "alex",   name: "Alex",   color: "#60a5fa", glow: "rgba(96,165,250,0.4)",  emoji: "⚡" },
-  vivek:  { id: "vivek",  name: "Vivek",  color: "#34d399", glow: "rgba(52,211,153,0.4)",  emoji: "🔥" },
-} as const;
+export const USERS: Record<string, { id: string; name: string; color: string; glow: string; emoji: string; joinDate?: string }> = {
+  keshiv:  { id: "keshiv",  name: "Keshiv",  color: "#a78bfa", glow: "rgba(167,139,250,0.4)", emoji: "🦅" },
+  alex:    { id: "alex",    name: "Alex",     color: "#60a5fa", glow: "rgba(96,165,250,0.4)",  emoji: "⚡" },
+  vivek:   { id: "vivek",   name: "Vivek",    color: "#34d399", glow: "rgba(52,211,153,0.4)",  emoji: "🔥" },
+  anahita: { id: "anahita", name: "Anahita",  color: "#fb923c", glow: "rgba(251,146,60,0.4)",  emoji: "☄️", joinDate: "2026-04-14" },
+};
 
 export type UserId = keyof typeof USERS;
 

@@ -50,10 +50,11 @@ interface SerialClockIn {
 
 interface SerialCorrection {
   id: string;
-  clockInId: string;
+  type: string;
+  clockInId: string | null;
   clockInUserId: string;
   requestedBy: string;
-  originalTimestamp: string;
+  originalTimestamp: string | null;
   requestedTimestamp: string;
   reason: string;
   status: string;
@@ -101,8 +102,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     const todayClockIn = userClockIns.find((c) => c.date === today);
     const clockInDates = new Set(userClockIns.map((c) => c.date));
 
-    const attended = completedLectures.filter((d) => clockInDates.has(d)).length;
-    const absences = completedLectures.filter((d) => !clockInDates.has(d)).length;
+    const userFirstTracked = user.joinDate ?? FIRST_TRACKED_LECTURE;
+    const userCompletedLectures = completedLectures.filter((d) => d >= userFirstTracked);
+    const attended = userCompletedLectures.filter((d) => clockInDates.has(d)).length;
+    const absences = userCompletedLectures.filter((d) => !clockInDates.has(d)).length;
 
     const latenesses = userClockIns.map((c) => getLatenessMinutes(c.correctedTimestamp ?? c.timestamp));
 
@@ -135,7 +138,7 @@ export async function loader({ request }: Route.LoaderArgs) {
       todayLateness,
       attended,
       absences,
-      totalTracked: completedLectures.length,
+      totalTracked: userCompletedLectures.length,
     };
   });
 

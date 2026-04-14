@@ -13,7 +13,7 @@ export interface IClockIn {
 
 const ClockInSchema = new mongoose.Schema<IClockIn>(
   {
-    userId: { type: String, required: true, enum: ["keshiv", "alex", "vivek"] },
+    userId: { type: String, required: true, enum: ["keshiv", "alex", "vivek", "anahita"] },
     timestamp: { type: Date, required: true },
     date: { type: String, required: true },
     correctedTimestamp: { type: Date },
@@ -28,10 +28,11 @@ const ClockInSchema = new mongoose.Schema<IClockIn>(
 // ── CorrectionRequest ────────────────────────────────────────────────────────
 export interface ICorrectionRequest {
   _id: Types.ObjectId;
-  clockInId: Types.ObjectId;
+  type: "correction" | "add-missed";
+  clockInId?: Types.ObjectId;
   clockInUserId: string;
   requestedBy: string;
-  originalTimestamp: Date;
+  originalTimestamp?: Date;
   requestedTimestamp: Date;
   reason: string;
   status: "pending" | "approved" | "rejected";
@@ -41,10 +42,11 @@ export interface ICorrectionRequest {
 
 const CorrectionRequestSchema = new mongoose.Schema<ICorrectionRequest>(
   {
-    clockInId: { type: mongoose.Schema.Types.ObjectId, ref: "ClockIn", required: true },
+    type: { type: String, enum: ["correction", "add-missed"], default: "correction" },
+    clockInId: { type: mongoose.Schema.Types.ObjectId, ref: "ClockIn" },
     clockInUserId: { type: String, required: true },
     requestedBy: { type: String, required: true },
-    originalTimestamp: { type: Date, required: true },
+    originalTimestamp: { type: Date },
     requestedTimestamp: { type: Date, required: true },
     reason: { type: String, default: "" },
     status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
@@ -68,7 +70,7 @@ export interface IUserPassword {
 }
 
 const UserPasswordSchema = new mongoose.Schema<IUserPassword>({
-  userId: { type: String, required: true, unique: true, enum: ["keshiv", "alex", "vivek"] },
+  userId: { type: String, required: true, unique: true, enum: ["keshiv", "alex", "vivek", "anahita"] },
   password: { type: String, required: true },
 });
 
