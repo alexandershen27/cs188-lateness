@@ -387,8 +387,8 @@ function LatenessTag({ minutes }: { minutes: number | null }) {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-const PERLOFF_LAT = 34.073471;
-const PERLOFF_LNG = -118.440165;
+const PERLOFF_LAT = 34.073190957937626;
+const PERLOFF_LNG = -118.44053177362116;
 const AT_LECTURE_RADIUS_KM = 0.15;
 
 function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
