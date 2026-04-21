@@ -389,7 +389,7 @@ function LatenessTag({ minutes }: { minutes: number | null }) {
 
 const PERLOFF_LAT = 34.073471;
 const PERLOFF_LNG = -118.440165;
-const AT_LECTURE_RADIUS_KM = 0.05;
+const AT_LECTURE_RADIUS_KM = 0.15;
 
 function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;

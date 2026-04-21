@@ -13,7 +13,7 @@ export interface IClockIn {
 
 const ClockInSchema = new mongoose.Schema<IClockIn>(
   {
-    userId: { type: String, required: true, enum: ["keshiv", "alex", "vivek", "anahita"] },
+    userId: { type: String, required: true, enum: ["keshiv", "alex", "vivek", "jillie"] },
     timestamp: { type: Date, required: true },
     date: { type: String, required: true },
     correctedTimestamp: { type: Date },
@@ -70,7 +70,7 @@ export interface IUserPassword {
 }
 
 const UserPasswordSchema = new mongoose.Schema<IUserPassword>({
-  userId: { type: String, required: true, unique: true, enum: ["keshiv", "alex", "vivek", "anahita"] },
+  userId: { type: String, required: true, unique: true, enum: ["keshiv", "alex", "vivek", "jillie"] },
   password: { type: String, required: true },
 });
 
