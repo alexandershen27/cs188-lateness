@@ -194,10 +194,12 @@ export async function action({ request }: Route.ActionArgs) {
       if (lat === null || lng === null) {
         return data({ error: "Location is required to clock in." }, { status: 403 });
       }
-      const dx = lat - 34.073471;
-      const dy = lng - -118.440165;
-      const approxKm = Math.sqrt(dx * dx + dy * dy) * 111;
-      if (approxKm > 0.05) {
+      const R = 6371;
+      const dLat = (lat - 34.073190957937626) * Math.PI / 180;
+      const dLng = (lng - -118.44053177362116) * Math.PI / 180;
+      const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat * Math.PI / 180) * Math.cos(34.073190957937626 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+      const distKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      if (distKm > 0.3) {
         return data({ error: "You need to be at Perloff Hall to clock in." }, { status: 403 });
       }
     }
@@ -389,7 +391,7 @@ function LatenessTag({ minutes }: { minutes: number | null }) {
 
 const PERLOFF_LAT = 34.073190957937626;
 const PERLOFF_LNG = -118.44053177362116;
-const AT_LECTURE_RADIUS_KM = 0.15;
+const AT_LECTURE_RADIUS_KM = 0.3;
 
 function distanceKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
@@ -439,7 +441,8 @@ function ClockInSection({ today, usersWithoutPassword, isLectureDay, nextLecture
       setLocationStatus("requesting");
       navigator.geolocation.getCurrentPosition(
         (pos) => { setLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude }); setLocationStatus("granted"); },
-        () => setLocationStatus("denied")
+        () => setLocationStatus("denied"),
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
       );
     }
   }, []);
