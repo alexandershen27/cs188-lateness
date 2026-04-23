@@ -867,7 +867,7 @@ function CorrectionsSection({ clockIns, corrections, today, classIsOver, devMode
               color: mode === "request" ? "#a78bfa" : "#9ca3af",
               border: `1px solid ${mode === "request" ? "rgba(167,139,250,0.3)" : "rgba(255,255,255,0.08)"}`,
             }}>
-            ± Request
+            ± Edit
           </button>
           {pending.length > 0 && (
             <button onClick={() => setMode(mode === "approve" ? null : "approve")}
@@ -897,7 +897,7 @@ function CorrectionsSection({ clockIns, corrections, today, classIsOver, devMode
       {mode === "request" && (
         <fetcher.Form method="post" className="space-y-4 mb-5 p-4 rounded-xl" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }} onSubmit={() => setMode(null)}>
           <input type="hidden" name="intent" value="request-correction" />
-          <div className="text-sm font-semibold mb-3" style={{ color: "#a78bfa" }}>Request a Correction</div>
+          <div className="text-sm font-semibold mb-3" style={{ color: "#a78bfa" }}>Edit a Clock-In</div>
           <div>
             <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Your name</label>
             <select name="userId" value={requestUserId} onChange={(e) => setRequestUserId(e.target.value)}
@@ -927,10 +927,13 @@ function CorrectionsSection({ clockIns, corrections, today, classIsOver, devMode
           )}
           <div>
             <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Corrected time</label>
-            <input type="datetime-local" value={requestedTime} onChange={(e) => setRequestedTime(e.target.value)}
+            <input type="time" value={requestedTime} onChange={(e) => setRequestedTime(e.target.value)}
               className="w-full px-3 py-2 rounded-lg text-sm outline-none"
               style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", color: "white", colorScheme: "dark" }} />
-            <input type="hidden" name="requestedTimestamp" value={requestedTime ? new Date(requestedTime).toISOString() : ""} />
+            <input type="hidden" name="requestedTimestamp" value={(() => {
+              const selected = myClockIns.find((c) => c.id === selectedClockIn);
+              return selected && requestedTime ? new Date(`${selected.date}T${requestedTime}:00`).toISOString() : "";
+            })()} />
           </div>
           <div>
             <label className="block text-xs mb-1" style={{ color: "#6b7280" }}>Reason</label>
@@ -949,7 +952,7 @@ function CorrectionsSection({ clockIns, corrections, today, classIsOver, devMode
             disabled={!selectedClockIn || !requestedTime || !requestPassword || !requestUserId || fetcher.state === "submitting"}
             className="w-full py-2 rounded-lg text-sm font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed"
             style={{ background: "rgba(167,139,250,0.2)", color: "#a78bfa", border: "1px solid rgba(167,139,250,0.3)" }}>
-            {fetcher.state === "submitting" ? "Submitting..." : "Submit Request"}
+            {fetcher.state === "submitting" ? "Submitting..." : "Submit Edit"}
           </button>
         </fetcher.Form>
       )}
