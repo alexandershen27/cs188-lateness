@@ -17,9 +17,6 @@ export const CLASS_END_MINUTE = 50;
 // First day of official tracking (absences count from here)
 export const FIRST_TRACKED_LECTURE = "2026-04-07";
 
-// Penalty applied to stats for a missed lecture
-export const ABSENCE_PENALTY_MINUTES = 110;
-
 // Tue/Thu schedule weeks 1–10. April 2 was intro day (week 1, no absence tracking).
 // Official lectures start April 7 (week 2).
 export const LECTURE_SCHEDULE: { week: number; date: string }[] = [

@@ -13,7 +13,6 @@ import {
   getNextLecture,
   LECTURE_SCHEDULE,
   getCompletedOfficialLectures,
-  ABSENCE_PENALTY_MINUTES,
   FIRST_TRACKED_LECTURE,
 } from "~/lib/config";
 
@@ -109,9 +108,6 @@ export async function loader({ request }: Route.LoaderArgs) {
 
     const latenesses = userClockIns.map((c) => getLatenessMinutes(c.correctedTimestamp ?? c.timestamp));
 
-    // Average includes absence penalty
-    const allForAvg = [...latenesses, ...Array(absences).fill(ABSENCE_PENALTY_MINUTES)];
-
     const todayLateness = todayClockIn
       ? getLatenessMinutes(todayClockIn.correctedTimestamp ?? todayClockIn.timestamp)
       : null;
@@ -123,13 +119,13 @@ export async function loader({ request }: Route.LoaderArgs) {
       glow: user.glow,
       emoji: user.emoji,
       totalClockIns: userClockIns.length,
-      averageLateness: allForAvg.length
-        ? allForAvg.reduce((a, b) => a + b, 0) / allForAvg.length
+      averageLateness: latenesses.length
+        ? latenesses.reduce((a, b) => a + b, 0) / latenesses.length
         : null,
       bestLateness: latenesses.length ? Math.min(...latenesses) : null,
       worstLateness: latenesses.length ? Math.max(...latenesses) : null,
-      onTimeRate: allForAvg.length
-        ? (allForAvg.filter((l) => l <= 5).length / allForAvg.length) * 100
+      onTimeRate: latenesses.length
+        ? (latenesses.filter((l) => l <= 5).length / latenesses.length) * 100
         : null,
       lastClockIn: userClockIns.length
         ? (userClockIns[userClockIns.length - 1].correctedTimestamp ?? userClockIns[userClockIns.length - 1].timestamp).toISOString()
